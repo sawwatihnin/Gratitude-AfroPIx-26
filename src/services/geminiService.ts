@@ -66,6 +66,7 @@ CATEGORIZATION
 - type: one of ["event","volunteer","foodbank","donation","class","workshop","networking","support_group","clinic","legal_aid","shelter","resource_center"]
 - audience: one of ["student","professional","general","families","seniors"]
 - If uncertain, set audience to "general" and needs_review=true.
+- Events MUST default to upcoming-only results (exclude past events unless user explicitly asks).
 
 FILTER FIELDS (include when available)
 - Student-focused fields: fieldOfStudy, academicLevel ["undergrad","grad","any"], careerFocus ["internship","networking","skills","social","any"]
@@ -77,11 +78,24 @@ ORGANIZATION COVERAGE
 RESPONSE FORMAT
 Return ONLY valid JSON with this exact top-level shape:
 {
+  "ui_layout": {
+    "layout_type": "two_column_nextdoor_style_v3",
+    "left_tabs": ["events","volunteer","food_assistance","organizations","clinics_legal","connections","saved","map_all","settings"],
+    "right_view_mode": "list|map|split",
+    "active_tab": "events|volunteer|food_assistance|organizations|clinics_legal|connections|saved|map_all|settings"
+  },
   "query_context": {
-    "user_location": {"lat": number, "lon": number, "city": "string"},
+    "user_timezone": "America/New_York",
+    "now_local": "ISO_8601_TIMESTAMP",
+    "user_location": {"lat": number|null, "lon": number|null, "city": "string|null", "zip": "string|null"},
     "radius_miles": number,
     "date_range": {"start": "ISO8601", "end": "ISO8601"},
     "generated_at": "ISO8601"
+  },
+  "filters": {
+    "common": {"radius_miles": 10, "sort": "distance|soonest|newest|relevance", "audience": ["student","professional","general"]},
+    "events": {"time_window": "upcoming_only|today|this_week|this_month|custom", "include_past_events": false, "include_undated": false, "date_range": {"start": null, "end": null}, "type": [], "cost": "free_only|any", "time_of_day": [], "format": "in_person|online|hybrid|any"},
+    "connections": {"audience_type": ["student","professional","general"], "field_of_study": [], "academic_level": "undergrad|grad|any", "industry": [], "experience_level": "entry|mid|senior|any", "skills": [], "interests": []}
   },
   "ui_settings": {
     "appearance": "system|light|dark",
@@ -93,12 +107,14 @@ Return ONLY valid JSON with this exact top-level shape:
   },
   "results": [
     {
+      "entity_kind": "event|volunteer|resource|organization|clinic_legal",
       "title": "string",
       "type": "event|volunteer|foodbank|donation|class|workshop|networking|support_group|clinic|legal_aid|shelter|resource_center",
       "audience": "student|professional|general|families|seniors",
       "date_start": "ISO8601|null",
       "date_end": "ISO8601|null",
       "date_unknown": boolean,
+      "is_upcoming": boolean,
       "location_name": "string",
       "address": "string",
       "lat": "number|null",
@@ -109,7 +125,8 @@ Return ONLY valid JSON with this exact top-level shape:
       "accessibility_notes": "string",
       "source_name": "string",
       "source_url": "string",
-      "confidence": {"overall": "high|medium|low", "date": "string", "location": "string", "type": "string"},
+      "retrieved_at": "ISO_8601_TIMESTAMP",
+      "confidence": {"overall": "high|medium|low", "date": "high|medium|low", "location": "high|medium|low", "type": "high|medium|low"},
       "needs_review": boolean,
       "fieldOfStudy": "string (optional)",
       "academicLevel": "undergrad|grad|any (optional)",
@@ -132,6 +149,8 @@ Return ONLY valid JSON with this exact top-level shape:
       "distance_miles": "number|null"
     }
   ],
+  "connections": [],
+  "messages": [],
   "notes": ["brief gaps/limitations + source strategy used"]
 }
 

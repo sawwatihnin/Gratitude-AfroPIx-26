@@ -17,6 +17,7 @@ const __dirname = path.dirname(__filename);
 
 const db = new Database("community.db");
 const scraperCache = new Map();
+const geocodeCache = new Map();
 const CURRENT_USER_ID = "user_me";
 
 const simulatedProfiles = [
@@ -267,6 +268,7 @@ db.exec(`
     confidence_date TEXT,
     confidence_location TEXT,
     confidence_type TEXT,
+    retrieved_at TEXT,
     needs_review INTEGER,
     category TEXT,
     phone TEXT,
@@ -287,7 +289,17 @@ db.exec(`
     summary TEXT,
     last_updated DATETIME DEFAULT CURRENT_TIMESTAMP
   );
+
+  CREATE TABLE IF NOT EXISTS geocode_cache (
+    query TEXT PRIMARY KEY,
+    lat REAL,
+    lon REAL,
+    last_updated DATETIME DEFAULT CURRENT_TIMESTAMP
+  );
 `);
+try {
+  db.prepare("ALTER TABLE community_items ADD COLUMN retrieved_at TEXT").run();
+} catch {}
 
 function normalizeText(value) {
   return (value || "").replace(/\s+/g, " ").trim();
@@ -317,6 +329,47 @@ function isBlocked(viewerId, otherId) {
 function sharedValues(a = [], b = []) {
   const setB = new Set((b || []).map((v) => v.toLowerCase()));
   return (a || []).filter((v) => setB.has(v.toLowerCase()));
+}
+
+function normalizeGeocodeQuery(value) {
+  return normalizeText(value || "").toLowerCase();
+}
+
+async function geocodeQuery(query) {
+  const q = normalizeGeocodeQuery(query);
+  if (!q) return null;
+  if (geocodeCache.has(q)) return geocodeCache.get(q);
+
+  const cached = db.prepare("SELECT lat, lon FROM geocode_cache WHERE query = ?").get(q);
+  if (cached?.lat != null && cached?.lon != null) {
+    const result = { lat: Number(cached.lat), lon: Number(cached.lon), confidence: "medium" };
+    geocodeCache.set(q, result);
+    return result;
+  }
+
+  try {
+    const params = new URLSearchParams({
+      q,
+      format: "jsonv2",
+      limit: "1",
+      addressdetails: "0",
+    });
+    const response = await fetch(`https://nominatim.openstreetmap.org/search?${params.toString()}`, {
+      headers: { "User-Agent": "GratitudeGeocoder/1.0 (+community map hydration)" },
+    });
+    if (!response.ok) return null;
+    const results = await response.json();
+    const first = Array.isArray(results) ? results[0] : null;
+    if (!first?.lat || !first?.lon) return null;
+    const parsed = { lat: Number(first.lat), lon: Number(first.lon), confidence: "low" };
+    geocodeCache.set(q, parsed);
+    db.prepare(
+      "INSERT OR REPLACE INTO geocode_cache (query, lat, lon, last_updated) VALUES (?, ?, ?, CURRENT_TIMESTAMP)"
+    ).run(q, parsed.lat, parsed.lon);
+    return parsed;
+  } catch {
+    return null;
+  }
 }
 
 function decodeHtml(value) {
@@ -445,6 +498,7 @@ function parseRssOrAtom(xml, sourceName, sourceUrl) {
       accessibility_notes: "Not listed",
       source_name: sourceName,
       source_url: sourceLink,
+      retrieved_at: new Date().toISOString(),
       confidence: {
         overall: start ? "medium" : "low",
         date: start ? "Parsed from feed date field" : "Date not listed in feed",
@@ -500,6 +554,7 @@ function parseIcs(text, sourceName, sourceUrl) {
       accessibility_notes: "Not listed",
       source_name: sourceName,
       source_url: link,
+      retrieved_at: new Date().toISOString(),
       confidence: {
         overall: start ? "high" : "medium",
         date: start ? "Parsed from ICS DTSTART/DTEND" : "No parseable DTSTART",
@@ -597,6 +652,7 @@ async function fetchTicketmasterEvents(query, location) {
         accessibility_notes: normalizeText(event?.accessibility?.info || "Not listed"),
         source_name: "Ticketmaster API",
         source_url: canonicalUrl(event?.url || ""),
+        retrieved_at: new Date().toISOString(),
         confidence: {
           overall: "high",
           date: dateStart ? "Provided by Ticketmaster event data" : "Date missing in provider payload",
@@ -670,6 +726,7 @@ async function fetchEventbriteEvents(query, location) {
         accessibility_notes: "Not listed",
         source_name: "Eventbrite API",
         source_url: canonicalUrl(event?.url || ""),
+        retrieved_at: new Date().toISOString(),
         confidence: {
           overall: "high",
           date: "Provided by Eventbrite event data",
@@ -803,10 +860,22 @@ async function startServer() {
   app.get("/api/items/:tab", (req, res) => {
     const { tab } = req.params;
     let items;
-    if (tab === 'all') {
+    if (tab === "all" || tab === "map_view") {
       items = db.prepare("SELECT * FROM community_items").all();
+    } else if (tab === "mylist" || tab === "connections") {
+      items = [];
+    } else if (tab === "clinics_legal") {
+      items = db.prepare("SELECT * FROM community_items WHERE type IN ('clinic', 'legal_aid')").all();
+    } else if (tab === "organizations") {
+      items = db.prepare("SELECT * FROM community_items WHERE type IN ('organization', 'resource_center', 'shelter', 'legal_aid', 'clinic')").all();
+    } else if (tab === "foodbanks") {
+      items = db.prepare("SELECT * FROM community_items WHERE type IN ('foodbank', 'donation')").all();
+    } else if (tab === "events") {
+      items = db.prepare("SELECT * FROM community_items WHERE type IN ('event', 'class', 'workshop', 'networking', 'support_group')").all();
+    } else if (tab === "volunteer") {
+      items = db.prepare("SELECT * FROM community_items WHERE type = 'volunteer'").all();
     } else {
-      items = db.prepare("SELECT * FROM community_items WHERE type = ?").all(tab.replace(/s$/, ''));
+      items = [];
     }
     const normalizedItems = items.map((item) => {
       let parsedServices = null;
@@ -842,9 +911,9 @@ async function startServer() {
         type, audience, latitude, longitude, distance_miles, organizer, accessibility_notes,
         source_name, source_url, confidence_overall, confidence_date, confidence_location,
         confidence_type, needs_review, category, phone, hours, services, eligibility,
-        fieldOfStudy, academicLevel, careerFocus, industry, seniorityLevel, networkingVsTraining
+        retrieved_at, fieldOfStudy, academicLevel, careerFocus, industry, seniorityLevel, networkingVsTraining
       )
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
 
     const transaction = db.transaction((list) => {
@@ -877,6 +946,7 @@ async function startServer() {
           item.hours || null,
           item.services ? JSON.stringify(item.services) : null,
           item.eligibility || null,
+          item.retrieved_at || new Date().toISOString(),
           item.fieldOfStudy || null,
           item.academicLevel || null,
           item.careerFocus || null,
@@ -888,7 +958,21 @@ async function startServer() {
     });
 
     const allItems = [...(items || []), ...(organizations || [])];
-    transaction(allItems);
+    const seen = new Set();
+    const deduped = [];
+    for (const item of allItems) {
+      const title = normalizeText(item.title || item.name).toLowerCase();
+      const locationName = normalizeText(item.location_name || item.address).toLowerCase();
+      const day = item.date_start ? String(item.date_start).slice(0, 10) : "unknown";
+      const type = normalizeText(item.type || "organization").toLowerCase();
+      const url = item.source_url ? canonicalUrl(item.source_url) : "";
+      const key = url ? `url:${url}` : `${title}|${locationName}|${day}|${type}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      deduped.push(item);
+    }
+
+    transaction(deduped);
 
     db.prepare("INSERT OR REPLACE INTO search_cache (tab, summary, last_updated) VALUES (?, ?, CURRENT_TIMESTAMP)")
       .run(tab, summary);
@@ -1088,22 +1172,72 @@ async function startServer() {
     return res.json({ message });
   });
 
+  app.post("/api/geocode/batch", async (req, res) => {
+    const queries = Array.isArray(req.body?.queries) ? req.body.queries : [];
+    const unique = [...new Set(queries.map((q) => normalizeText(q)).filter(Boolean))].slice(0, 1000);
+    const results = {};
+
+    for (const query of unique) {
+      const hit = await geocodeQuery(query);
+      if (hit) {
+        results[query] = hit;
+      }
+    }
+
+    return res.json({ results });
+  });
+
   app.post("/api/scrape-fallback", async (req, res) => {
     const { query, location } = req.body || {};
     const scraped = await scrapeSources(query || "", location);
     res.json({
+      ui_layout: {
+        layout_type: "two_column_nextdoor_style_v3",
+        left_tabs: ["events","volunteer","food_assistance","organizations","clinics_legal","connections","saved","map_all","settings"],
+        right_view_mode: "list",
+        active_tab: "events"
+      },
       query_context: {
+        user_timezone: Intl.DateTimeFormat().resolvedOptions().timeZone || "America/New_York",
+        now_local: new Date().toISOString(),
         user_location: {
           lat: location?.latitude ?? null,
           lon: location?.longitude ?? null,
-          city: "Unknown",
+          city: null,
+          zip: null
         },
-        radius_miles: 25,
+        radius_miles: Number(process.env.SCRAPER_RADIUS_MILES || 25),
         date_range: {
           start: new Date().toISOString(),
           end: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString(),
         },
         generated_at: new Date().toISOString(),
+      },
+      filters: {
+        common: {
+          radius_miles: 10,
+          sort: "distance",
+          audience: ["student", "professional", "general"]
+        },
+        events: {
+          time_window: "upcoming_only",
+          include_past_events: false,
+          include_undated: false,
+          date_range: { start: null, end: null },
+          type: [],
+          cost: "any",
+          time_of_day: [],
+          format: "any"
+        },
+        connections: {
+          audience_type: ["student", "professional", "general"],
+          field_of_study: [],
+          academic_level: "any",
+          industry: [],
+          experience_level: "any",
+          skills: [],
+          interests: []
+        }
       },
       ui_settings: {
         appearance: "system",
@@ -1115,6 +1249,8 @@ async function startServer() {
       },
       results: scraped.results,
       organizations: scraped.organizations,
+      connections: [],
+      messages: [],
       notes: scraped.notes,
     });
   });
@@ -1144,11 +1280,24 @@ async function startServer() {
 
             RESPONSE FORMAT (JSON):
             {
+              "ui_layout": {
+                "layout_type": "two_column_nextdoor_style_v3",
+                "left_tabs": ["events","volunteer","food_assistance","organizations","clinics_legal","connections","saved","map_all","settings"],
+                "right_view_mode": "list|map|split",
+                "active_tab": "events|volunteer|food_assistance|organizations|clinics_legal|connections|saved|map_all|settings"
+              },
               "query_context": {
-                "user_location": {"lat": number, "lon": number, "city": "string"},
+                "user_timezone": "America/New_York",
+                "now_local": "ISO_8601_TIMESTAMP",
+                "user_location": {"lat": number|null, "lon": number|null, "city": "string|null", "zip": "string|null"},
                 "radius_miles": number,
                 "date_range": {"start": "ISO8601", "end": "ISO8601"},
                 "generated_at": "ISO8601"
+              },
+              "filters": {
+                "common": {"radius_miles": 10, "sort": "distance|soonest|newest|relevance", "audience": ["student","professional","general"]},
+                "events": {"time_window": "upcoming_only|today|this_week|this_month|custom", "include_past_events": false, "include_undated": false, "date_range": {"start": null, "end": null}, "type": [], "cost": "free_only|any", "time_of_day": [], "format": "in_person|online|hybrid|any"},
+                "connections": {"audience_type": ["student","professional","general"], "field_of_study": [], "academic_level": "undergrad|grad|any", "industry": [], "experience_level": "entry|mid|senior|any", "skills": [], "interests": []}
               },
               "ui_settings": {
                 "appearance": "system|light|dark",
@@ -1160,12 +1309,14 @@ async function startServer() {
               },
               "results": [
                 {
+                  "entity_kind": "event|volunteer|resource|organization|clinic_legal",
                   "title": "string",
                   "type": "event|volunteer|foodbank|donation|class|workshop|networking|support_group|clinic|legal_aid|shelter|resource_center",
                   "audience": "student|professional|general|families|seniors",
                   "date_start": "ISO8601|null",
                   "date_end": "ISO8601|null",
                   "date_unknown": boolean,
+                  "is_upcoming": boolean,
                   "location_name": "string",
                   "address": "string",
                   "lat": "number|null",
@@ -1176,7 +1327,8 @@ async function startServer() {
                   "accessibility_notes": "string",
                   "source_name": "string",
                   "source_url": "string",
-                  "confidence": {"overall": "high|medium|low", "date": "string", "location": "string", "type": "string"},
+                  "retrieved_at": "ISO8601",
+                  "confidence": {"overall": "high|medium|low", "date": "high|medium|low", "location": "high|medium|low", "type": "high|medium|low"},
                   "needs_review": boolean
                 }
               ],
@@ -1193,6 +1345,8 @@ async function startServer() {
                   "distance_miles": "number|null"
                 }
               ],
+              "connections": [],
+              "messages": [],
               "notes": ["gaps/limitations and which sources were used"]
             }
 

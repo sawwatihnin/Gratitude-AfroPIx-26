@@ -1,5 +1,6 @@
 export interface CommunityItem {
   id: string;
+  entity_kind?: 'event' | 'volunteer' | 'resource' | 'organization' | 'clinic_legal';
   title: string;
   name?: string; // For organizations
   description: string;
@@ -8,6 +9,7 @@ export interface CommunityItem {
   date_start?: string;
   date_end?: string;
   date_unknown?: boolean;
+  is_upcoming?: boolean;
   type: 'event' | 'volunteer' | 'foodbank' | 'donation' | 'class' | 'workshop' | 'networking' | 'support_group' | 'clinic' | 'legal_aid' | 'shelter' | 'resource_center' | 'organization';
   audience: 'student' | 'professional' | 'general' | 'families' | 'seniors';
   latitude?: number;
@@ -19,6 +21,7 @@ export interface CommunityItem {
   accessibility_notes?: string;
   source_name?: string;
   source_url?: string;
+  retrieved_at?: string;
   confidence?: {
     overall: 'high' | 'medium' | 'low';
     date: string;

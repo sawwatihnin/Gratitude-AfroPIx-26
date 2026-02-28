@@ -1,15 +1,24 @@
 # Gratitude
 
-Gratitude is a Vite + React + Express app for discovering local community resources.
+Gratitude is a Vite + React + Express app for discovering nearby:
+- Events
+- Volunteer opportunities
+- Food banks and donation resources
+- Community organizations/services
+- Nearby user connections (simulated local networking)
 
 ## Prerequisites
 
 1. Node.js `22.12+` (recommended) or `20.19+`
 2. npm `10+`
 
-## Environment Setup
+## Quick Start (macOS + Windows)
 
-1. Copy the example env file:
+1. Install dependencies:
+   ```bash
+   npm install
+   ```
+2. Create `.env`:
    - macOS/Linux:
      ```bash
      cp .env.example .env
@@ -18,73 +27,120 @@ Gratitude is a Vite + React + Express app for discovering local community resour
      ```powershell
      Copy-Item .env.example .env
      ```
-2. Open `.env` and set:
-   - `GEMINI_API_KEY` (required for Gemini requests)
-   - `OPENAI_API_KEY` (optional failover)
-   - `SCRAPER_SOURCES` (recommended deterministic fallback feeds)
-   - `SCRAPER_TIMEOUT_MS` (optional per-source timeout)
-   - `SCRAPER_RADIUS_MILES` (optional API-source radius)
-   - `TICKETMASTER_API_KEY` (optional API source)
-   - `EVENTBRITE_API_TOKEN` (optional API source)
+3. Start development server:
+   ```bash
+   npm run dev
+   ```
+4. Open [http://localhost:3000](http://localhost:3000)
 
-### Deterministic Scraper Fallback (AI-off mode)
+## Environment Variables
 
-When AI is unavailable, the app now falls back automatically to a deterministic web-scraper pipeline:
-1. Gemini
-2. OpenAI failover
-3. `/api/scrape-fallback` (RSS/Atom/ICS sources, rule-based classification + dedupe)
+Set these in `.env`:
+- `GEMINI_API_KEY` (optional but recommended)
+- `OPENAI_API_KEY` (optional AI failover)
+- `SCRAPER_SOURCES` (recommended deterministic feeds)
+- `SCRAPER_TIMEOUT_MS` (optional, default `10000`)
+- `SCRAPER_RADIUS_MILES` (optional, default `25`)
+- `TICKETMASTER_API_KEY` (optional API source)
+- `EVENTBRITE_API_TOKEN` (optional API source)
+- `PORT` (optional, default `3000`)
 
-Configure `SCRAPER_SOURCES` in `.env`:
+Example:
 ```env
-SCRAPER_SOURCES="City Calendar|https://your-city.gov/events.rss,University Calendar|https://calendar.yourschool.edu/events.ics"
+SCRAPER_SOURCES="UNC Calendar|https://calendar.unc.edu/calendar.ics,Duke Calendar|https://calendar.duke.edu/events.ics,City Events|https://your-city.gov/events.rss"
 SCRAPER_TIMEOUT_MS=10000
 SCRAPER_RADIUS_MILES=25
 TICKETMASTER_API_KEY=your_ticketmaster_key
 EVENTBRITE_API_TOKEN=your_eventbrite_token
 ```
 
-Notes:
-- Add multiple high-quality official feeds for best coverage.
-- Fallback scraper classifies type/audience with deterministic keyword rules.
-- Source URL provenance is retained per listing.
-- Nearby college feeds preconfigured in this project include UNC, NC State, and Duke.
-- API-key sources now supported in fallback mode: Ticketmaster and Eventbrite.
+## Data Pipeline and Fallback Order
 
-## Run Locally (Cross-Platform)
+Request flow:
+1. Gemini
+2. OpenAI failover
+3. Deterministic scraper fallback (`/api/scrape-fallback`)
 
-All commands below work on both macOS and Windows.
+Scraper fallback behavior:
+- Parses RSS/Atom/ICS feeds.
+- Uses rule-based categorization (`type`, `audience`) when AI is unavailable.
+- Keeps `source_url` provenance.
+- Deduplicates events by canonical URL or title+venue+day signature.
+- Returns usable results even when no AI key is configured.
 
-1. Install dependencies:
+## Local Caching and Saved Data
+
+- Search results are cached in browser `localStorage` (`gratitude_tab_cache_v1`) by tab.
+- Saved items are stored in browser `localStorage` (`communitree_list`).
+- Server cache is stored in SQLite (`community.db`) via `/api/items`.
+- Duplicate entries are removed before client render and before server cache insert.
+
+## Run Modes
+
+Development:
+```bash
+npm run dev
+```
+
+Production-style local:
+```bash
+npm run build
+npm run start
+```
+
+Optional checks:
+```bash
+npm run lint
+npm run build
+```
+
+Health endpoint:
+- [http://localhost:3000/api/health](http://localhost:3000/api/health)
+
+## Troubleshooting
+
+Blank page / render error:
+1. Open browser console and copy first error line.
+2. Run:
    ```bash
-   npm install
-   ```
-2. Start in development mode:
-   ```bash
-   npm run dev
-   ```
-3. Open:
-   - [http://localhost:3000](http://localhost:3000)
-4. Optional health check:
-   - [http://localhost:3000/api/health](http://localhost:3000/api/health)
-
-## Production-Style Local Run
-
-1. Build:
-   ```bash
+   npm run lint
    npm run build
    ```
-2. Start server in production mode:
-   ```bash
-   npm run start
-   ```
-3. Open:
-   - [http://localhost:3000](http://localhost:3000)
+3. Restart dev server after fixes.
+
+Port in use (`EADDRINUSE`):
+- macOS/Linux:
+  ```bash
+  lsof -ti tcp:3000 | xargs kill -9
+  lsof -ti tcp:24678 | xargs kill -9
+  ```
+- Windows (PowerShell):
+  ```powershell
+  Get-NetTCPConnection -LocalPort 3000 | ForEach-Object { Stop-Process -Id $_.OwningProcess -Force }
+  Get-NetTCPConnection -LocalPort 24678 | ForEach-Object { Stop-Process -Id $_.OwningProcess -Force }
+  ```
+
+`PayloadTooLargeError`:
+- Ensure you are on latest code (server JSON body limit increased and cache writes reduced).
+- Restart server after pulling latest changes.
+
+No scraper results:
+1. Ensure `SCRAPER_SOURCES` is populated with valid public RSS/Atom/ICS URLs.
+2. Prefer official city/university/nonprofit feeds.
+3. Increase feed count for better coverage.
+
+## Recommended Upgrades
+
+1. Add server-side pagination for `/api/items/:tab` for faster first paint on large datasets.
+2. Add scheduled background scraper refresh jobs and stale cache invalidation by source.
+3. Add map marker clustering and lazy marker rendering for large result sets.
+4. Add WebSocket-based real-time updates for the Connections messaging panel.
+5. Add automated feed health checks (last successful scrape, parse failure rate).
 
 ## Scripts
 
-- `npm run dev`: Start app with dev server middleware.
-- `npm run build`: Build frontend assets into `dist/`.
-- `npm run start`: Run server in production mode (serves `dist/`).
-- `npm run lint`: Type-check with TypeScript.
-- `npm run preview`: Preview Vite build output.
-# Gratitude-AfroPIx-26
+- `npm run dev` - start Express + Vite middleware development server
+- `npm run build` - build frontend assets into `dist/`
+- `npm run start` - run server in production mode
+- `npm run lint` - TypeScript type-check (`tsc --noEmit`)
+- `npm run preview` - preview Vite build output

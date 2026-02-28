@@ -1,5 +1,6 @@
 import { useState, useEffect, useMemo } from 'react';
-import { 
+import type { ReactNode } from 'react';
+import {
   MapPin, 
   Calendar, 
   Heart, 
@@ -23,7 +24,6 @@ import {
   Building2,
   Settings,
   MessageCircle,
-  ArrowUpDown,
   Search
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
@@ -71,15 +71,108 @@ function getSystemPrefersDark(): boolean {
   return window.matchMedia('(prefers-color-scheme: dark)').matches;
 }
 
-type Tab = 'events' | 'volunteer' | 'foodbanks' | 'organizations' | 'connections' | 'mylist' | 'all';
+type Tab = 'events' | 'volunteer' | 'foodbanks' | 'organizations' | 'clinics_legal' | 'connections' | 'mylist' | 'map_view' | 'all';
 type Appearance = 'system' | 'light' | 'dark';
 type AccentPreset = 'failover' | 'carolina_blue' | 'custom';
 type AudienceFilter = 'all' | 'student' | 'professional' | 'general' | 'families' | 'seniors';
-type SortBy = 'date' | 'distance' | 'title';
+type SortBy = 'distance' | 'soonest' | 'newest' | 'relevance';
+type EventWindow = 'upcoming_only' | 'today' | 'this_week' | 'this_month' | 'custom';
 
 const FAILOVER_ACCENT = '#5A5A40';
 const CAROLINA_BLUE_ACCENT = '#4B9CD3';
 const CURRENT_USER_ID = 'user_me';
+const LOCAL_CACHE_KEY = 'gratitude_tab_cache_v1';
+
+function toCanonicalUrl(url?: string) {
+  if (!url) return '';
+  try {
+    const u = new URL(url);
+    u.hash = '';
+    return u.toString();
+  } catch {
+    return url;
+  }
+}
+
+function dedupeCommunityItems(list: CommunityItem[]): CommunityItem[] {
+  const seen = new Set<string>();
+  const out: CommunityItem[] = [];
+  for (const item of list) {
+    const day = item.date_start ? item.date_start.slice(0, 10) : 'unknown';
+    const key = item.source_url
+      ? `url:${toCanonicalUrl(item.source_url)}`
+      : `${(item.title || item.name || '').toLowerCase()}|${(item.location_name || item.address || '').toLowerCase()}|${day}|${item.type}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(item);
+  }
+  return out;
+}
+
+function readLocalTabCache(tab: string): { items: CommunityItem[]; summary: string } | null {
+  const raw = safeGetLocalStorage(LOCAL_CACHE_KEY);
+  if (!raw) return null;
+  try {
+    const parsed = JSON.parse(raw);
+    const entry = parsed?.[tab];
+    if (!entry) return null;
+    if (!Array.isArray(entry.items)) return null;
+    const ageMs = Date.now() - Number(entry.updatedAt || 0);
+    if (ageMs > 1000 * 60 * 60 * 12) return null;
+    return { items: entry.items, summary: entry.summary || '' };
+  } catch {
+    return null;
+  }
+}
+
+function writeLocalTabCache(tab: string, items: CommunityItem[], summary: string) {
+  const raw = safeGetLocalStorage(LOCAL_CACHE_KEY);
+  let parsed: Record<string, any> = {};
+  if (raw) {
+    try {
+      parsed = JSON.parse(raw);
+    } catch {
+      parsed = {};
+    }
+  }
+  parsed[tab] = {
+    items,
+    summary,
+    updatedAt: Date.now(),
+  };
+  safeSetLocalStorage(LOCAL_CACHE_KEY, JSON.stringify(parsed));
+}
+
+function normalizeSummary(value: string) {
+  if (!value) return '';
+  if (value.includes('Deterministic scraper fallback used')) {
+    return 'Showing local and verified feed results.';
+  }
+  return value;
+}
+
+function parseDateSafe(value?: string | null) {
+  if (!value) return null;
+  const d = new Date(value);
+  if (Number.isNaN(d.getTime())) return null;
+  return d;
+}
+
+function formatEventDate(start?: string, dateUnknown?: boolean) {
+  const parsed = parseDateSafe(start);
+  if (!parsed) return dateUnknown ? 'Date not listed' : 'Date not listed';
+  const hasTime = parsed.getUTCHours() !== 0 || parsed.getUTCMinutes() !== 0 || parsed.getUTCSeconds() !== 0;
+  if (!hasTime) {
+    return parsed.toLocaleDateString(undefined, { weekday: 'short', month: 'short', day: 'numeric' }) + ' (time not listed)';
+  }
+  return parsed.toLocaleString(undefined, { weekday: 'short', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }).replace(',', ' •');
+}
+
+function getGeocodeQuery(item: CommunityItem) {
+  const pieces = [item.address, item.location_name].filter(Boolean).map((v) => String(v).trim());
+  const query = pieces.find((v) => v && !/^not listed$/i.test(v));
+  return query || '';
+}
 
 export default function App() {
   const [activeTab, setActiveTab] = useState<Tab>('events');
@@ -93,12 +186,18 @@ export default function App() {
     const saved = safeGetLocalStorage('communitree_screenreader_labels');
     return saved === null ? true : saved === 'true';
   });
-  const [dyslexiaFont, setDyslexiaFont] = useState(() => safeGetLocalStorage('communitree_dyslexiafont') === 'true');
   const [systemPrefersDark, setSystemPrefersDark] = useState(() => getSystemPrefersDark());
   
   const [audienceFilter, setAudienceFilter] = useState<AudienceFilter>('all');
-  const [sortBy, setSortBy] = useState<SortBy>('distance');
+  const [sortBy, setSortBy] = useState<SortBy>('soonest');
+  const [radiusMiles, setRadiusMiles] = useState<number>(10);
   const [searchQuery, setSearchQuery] = useState("");
+  const [eventWindow, setEventWindow] = useState<EventWindow>('upcoming_only');
+  const [includePastEvents, setIncludePastEvents] = useState(false);
+  const [includeUndatedEvents, setIncludeUndatedEvents] = useState(false);
+  const [eventTypeFilter, setEventTypeFilter] = useState<string>('all');
+  const [customDateStart, setCustomDateStart] = useState<string>('');
+  const [customDateEnd, setCustomDateEnd] = useState<string>('');
   
   // Student Filters
   const [fieldOfStudy, setFieldOfStudy] = useState<string>("all");
@@ -113,8 +212,9 @@ export default function App() {
   // Org Filters
   const [orgCategoryFilter, setOrgCategoryFilter] = useState<string>("all");
 
-  const [viewMode, setViewMode] = useState<'grid' | 'map'>('grid');
+  const [viewMode, setViewMode] = useState<'grid' | 'map' | 'split'>('grid');
   const [showSettings, setShowSettings] = useState(false);
+  const [sidebarOpen, setSidebarOpen] = useState(false);
   
   const [location, setLocation] = useState<Location | null>(null);
   const [loading, setLoading] = useState(false);
@@ -178,8 +278,7 @@ export default function App() {
       `theme-${resolvedAppearance}`,
       highContrast && "high-contrast",
       largeTextMode && "large-text-mode",
-      reducedMotion && "reduced-motion",
-      dyslexiaFont && "dyslexia-font"
+      reducedMotion && "reduced-motion"
     );
     document.documentElement.style.setProperty('--accent-color', appliedAccentColor);
     safeSetLocalStorage('communitree_appearance', appearance);
@@ -189,8 +288,7 @@ export default function App() {
     safeSetLocalStorage('communitree_largetext', largeTextMode.toString());
     safeSetLocalStorage('communitree_reducedmotion', reducedMotion.toString());
     safeSetLocalStorage('communitree_screenreader_labels', screenReaderLabels.toString());
-    safeSetLocalStorage('communitree_dyslexiafont', dyslexiaFont.toString());
-  }, [appearance, accentPreset, accentCustomHex, resolvedAppearance, appliedAccentColor, highContrast, largeTextMode, reducedMotion, screenReaderLabels, dyslexiaFont]);
+  }, [appearance, accentPreset, accentCustomHex, resolvedAppearance, appliedAccentColor, highContrast, largeTextMode, reducedMotion, screenReaderLabels]);
 
   useEffect(() => {
     safeSetLocalStorage('communitree_list', JSON.stringify(myList));
@@ -299,17 +397,70 @@ export default function App() {
     }
   };
 
+  const hydrateCoordinates = async (baseItems: CommunityItem[], tabForCache: Tab) => {
+    const candidates = baseItems
+      .filter((item) => (item.latitude == null || item.longitude == null) && getGeocodeQuery(item))
+      .slice(0, 1000);
+    if (candidates.length === 0) return;
+
+    const queries = [...new Set(candidates.map((item) => getGeocodeQuery(item)))];
+    if (queries.length === 0) return;
+
+    try {
+      const response = await fetch('/api/geocode/batch', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ queries }),
+      });
+      const data = await response.json();
+      const map = data?.results || {};
+      if (!map || Object.keys(map).length === 0) return;
+
+      const updated = baseItems.map((item) => {
+        if (item.latitude != null && item.longitude != null) return item;
+        const q = getGeocodeQuery(item);
+        const hit = map[q];
+        if (!hit?.lat || !hit?.lon) return item;
+        return {
+          ...item,
+          latitude: hit.lat,
+          longitude: hit.lon,
+          lat: hit.lat,
+          lon: hit.lon,
+        };
+      });
+      const deduped = dedupeCommunityItems(updated);
+      setItems(deduped);
+      writeLocalTabCache(tabForCache, deduped, summary);
+    } catch (err) {
+      console.warn('Coordinate hydration failed', err);
+    }
+  };
+
   const handleSearch = async (tab: Tab, forceRefresh = false) => {
     setLoading(true);
     setError(null);
 
     if (!forceRefresh) {
+      const localCache = readLocalTabCache(tab);
+      if (localCache && localCache.items.length > 0) {
+        const cached = dedupeCommunityItems(localCache.items);
+        setItems(cached);
+        setSummary(normalizeSummary(localCache.summary));
+        hydrateCoordinates(cached, tab);
+        setLoading(false);
+        return;
+      }
       try {
         const cachedResponse = await fetch(`/api/items/${tab}`);
         const cachedData = await cachedResponse.json();
         if (cachedData.items && cachedData.items.length > 0) {
-          setItems(cachedData.items);
-          setSummary(cachedData.summary);
+          const dedupedCached = dedupeCommunityItems(cachedData.items);
+          setItems(dedupedCached);
+          const clean = normalizeSummary(cachedData.summary || '');
+          setSummary(clean);
+          writeLocalTabCache(tab, dedupedCached, clean);
+          hydrateCoordinates(dedupedCached, tab);
           setLoading(false);
           return;
         }
@@ -335,6 +486,12 @@ export default function App() {
       case 'organizations':
         query = "Find local organizations providing essential services like homeless shelters, legal aid, medical clinics, and food assistance.";
         break;
+      case 'clinics_legal':
+        query = "Find nearby clinics and legal aid resources, including free clinics, legal aid offices, and support services.";
+        break;
+      case 'map_view':
+        query = "Find all nearby events, volunteer opportunities, food assistance, organizations, clinics, shelters, and legal aid resources with coordinates for map display.";
+        break;
       default:
         setLoading(false);
         return;
@@ -347,6 +504,7 @@ export default function App() {
           ...item,
           id: item.id || `result-${tab}-${index}-${(item.title || item.name || 'item').toLowerCase().replace(/\s+/g, '-')}`,
           description: item.description || "",
+          retrieved_at: item.retrieved_at || new Date().toISOString(),
           latitude: item.lat || item.latitude,
           longitude: item.lon || item.longitude,
           coordinates: (item.lat != null && item.lon != null) ? [item.lat, item.lon] : 
@@ -357,6 +515,7 @@ export default function App() {
           id: org.id || `org-${tab}-${index}-${(org.name || 'organization').toLowerCase().replace(/\s+/g, '-')}`,
           title: org.name,
           description: org.description || "",
+          retrieved_at: org.retrieved_at || new Date().toISOString(),
           type: 'organization',
           audience: 'general',
           latitude: org.lat || org.latitude,
@@ -366,17 +525,21 @@ export default function App() {
         }))
       ];
       
-      setItems(mappedItems);
-      setSummary(data.summary);
+      const dedupedMapped = dedupeCommunityItems(mappedItems);
+      setItems(dedupedMapped);
+      const cleanedSummary = normalizeSummary(data.summary || '');
+      setSummary(cleanedSummary);
+      writeLocalTabCache(tab, dedupedMapped, cleanedSummary);
+      hydrateCoordinates(dedupedMapped, tab);
 
       // Save to server-side cache
       await fetch('/api/items', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ 
-          items: data.items, 
-          organizations: data.organizations, 
-          summary: data.summary, 
+          items: dedupedMapped.slice(0, 1200),
+          organizations: [],
+          summary: cleanedSummary,
           tab 
         })
       });
@@ -397,6 +560,16 @@ export default function App() {
       handleSearch(activeTab);
     }
   }, [activeTab, location]);
+
+  useEffect(() => {
+    if (activeTab === 'map_view') {
+      setViewMode('split');
+      setAudienceFilter('all');
+    }
+    if (activeTab === 'events') {
+      setSortBy('soonest');
+    }
+  }, [activeTab]);
 
   useEffect(() => {
     if (activeTab !== 'connections') return;
@@ -491,6 +664,51 @@ export default function App() {
         filtered = filtered.filter(item => item.category === orgCategoryFilter);
       }
     }
+    if (activeTab === 'clinics_legal') {
+      filtered = filtered.filter(item => item.type === 'clinic' || item.type === 'legal_aid');
+    }
+
+    // Events-specific date logic: upcoming-only by default.
+    if (activeTab === 'events') {
+      const now = new Date();
+      const endOfToday = new Date(now);
+      endOfToday.setHours(23, 59, 59, 999);
+      const endOfWeek = new Date(now);
+      endOfWeek.setDate(now.getDate() + (7 - now.getDay()));
+      endOfWeek.setHours(23, 59, 59, 999);
+      const endOfMonth = new Date(now.getFullYear(), now.getMonth() + 1, 0, 23, 59, 59, 999);
+      const customStart = parseDateSafe(customDateStart ? `${customDateStart}T00:00:00` : null);
+      const customEnd = parseDateSafe(customDateEnd ? `${customDateEnd}T23:59:59` : null);
+
+      filtered = filtered.filter((item) => {
+        const start = parseDateSafe(item.date_start);
+        const end = parseDateSafe(item.date_end);
+        const isUndated = !start && !end;
+        if (isUndated && !includeUndatedEvents) return false;
+
+        let isUpcoming = false;
+        if (start) isUpcoming = start >= now;
+        else if (end) isUpcoming = end >= now;
+
+        if (!includePastEvents && !isUndated && !isUpcoming) return false;
+
+        if (eventWindow === 'upcoming_only') return includePastEvents ? true : (isUpcoming || isUndated);
+        if (eventWindow === 'today') return !!start && start >= now && start <= endOfToday;
+        if (eventWindow === 'this_week') return !!start && start >= now && start <= endOfWeek;
+        if (eventWindow === 'this_month') return !!start && start >= now && start <= endOfMonth;
+        if (eventWindow === 'custom') {
+          if (!start) return includeUndatedEvents;
+          if (customStart && start < customStart) return false;
+          if (customEnd && start > customEnd) return false;
+          return true;
+        }
+        return true;
+      });
+
+      if (eventTypeFilter !== 'all') {
+        filtered = filtered.filter((item) => item.type === eventTypeFilter);
+      }
+    }
     
     // Add distance and Sort
     if (location) {
@@ -510,21 +728,33 @@ export default function App() {
       });
     }
 
+    // Common radius filter.
+    filtered = filtered.filter((item) => item.distance_miles == null || item.distance_miles <= radiusMiles);
+
     // Sorting
     filtered.sort((a, b) => {
       if (sortBy === 'distance') {
         return (a.distance_miles || 9999) - (b.distance_miles || 9999);
-      } else if (sortBy === 'date') {
-        const dateA = a.date_start ? new Date(a.date_start).getTime() : 0;
-        const dateB = b.date_start ? new Date(b.date_start).getTime() : 0;
-        return dateB - dateA;
+      } else if (sortBy === 'soonest') {
+        const dateA = a.date_start ? new Date(a.date_start).getTime() : Number.MAX_SAFE_INTEGER;
+        const dateB = b.date_start ? new Date(b.date_start).getTime() : Number.MAX_SAFE_INTEGER;
+        return dateA - dateB;
+      } else if (sortBy === 'newest') {
+        return new Date(b.date_start || 0).getTime() - new Date(a.date_start || 0).getTime();
+      } else if (sortBy === 'relevance') {
+        const qa = `${a.title || ''} ${a.description || ''}`.toLowerCase();
+        const qb = `${b.title || ''} ${b.description || ''}`.toLowerCase();
+        const q = searchQuery.toLowerCase();
+        const scoreA = q ? (qa.includes(q) ? 1 : 0) : 0;
+        const scoreB = q ? (qb.includes(q) ? 1 : 0) : 0;
+        return scoreB - scoreA || ((a.distance_miles || 9999) - (b.distance_miles || 9999));
       } else {
         return (a.title || a.name || "").localeCompare(b.title || b.name || "");
       }
     });
 
     return filtered;
-  }, [items, myList, activeTab, audienceFilter, location, searchQuery, sortBy, fieldOfStudy, academicLevel, careerFocus, industry, seniorityLevel, networkingVsTraining, orgCategoryFilter]);
+  }, [items, myList, activeTab, audienceFilter, location, searchQuery, sortBy, fieldOfStudy, academicLevel, careerFocus, industry, seniorityLevel, networkingVsTraining, orgCategoryFilter, radiusMiles, eventWindow, includePastEvents, includeUndatedEvents, eventTypeFilter, customDateStart, customDateEnd]);
 
   const toggleMyList = (item: CommunityItem) => {
     setMyList(prev => {
@@ -539,9 +769,61 @@ export default function App() {
   const isInList = (id: string) => myList.some(i => i.id === id);
 
   return (
-    <div className="min-h-screen flex flex-col max-w-6xl mx-auto px-4 py-8">
+    <div className="min-h-screen md:flex">
+      <aside className={cn(
+        "fixed md:sticky md:top-0 left-0 top-0 h-screen md:h-screen z-[120] w-72 bg-[var(--card-bg)] border-r border-[var(--border-color)] p-4 overflow-y-auto transition-transform",
+        sidebarOpen ? "translate-x-0" : "-translate-x-full md:translate-x-0"
+      )}>
+        <div className="flex items-center justify-between mb-4">
+          <h2 className="font-serif text-2xl">Gratitude</h2>
+          <button className="md:hidden p-2 opacity-70" onClick={() => setSidebarOpen(false)} aria-label="Close menu">
+            <X size={18} />
+          </button>
+        </div>
+        <div className="space-y-2">
+          <SidebarItem active={activeTab === 'events'} label="Events" icon={<Calendar size={16} />} onClick={() => { setActiveTab('events'); setSidebarOpen(false); }} />
+          <SidebarItem active={activeTab === 'volunteer'} label="Volunteer Opportunities" icon={<Heart size={16} />} onClick={() => { setActiveTab('volunteer'); setSidebarOpen(false); }} />
+          <SidebarItem active={activeTab === 'foodbanks'} label="Food Banks & Donations" icon={<ShoppingBasket size={16} />} onClick={() => { setActiveTab('foodbanks'); setSidebarOpen(false); }} />
+          <SidebarItem active={activeTab === 'organizations'} label="Organizations" icon={<Building2 size={16} />} onClick={() => { setActiveTab('organizations'); setSidebarOpen(false); }} />
+          <SidebarItem active={activeTab === 'clinics_legal'} label="Clinics & Legal Aid" icon={<Info size={16} />} onClick={() => { setActiveTab('clinics_legal'); setSidebarOpen(false); }} />
+          <SidebarItem active={activeTab === 'connections'} label="Connections" icon={<MessageCircle size={16} />} onClick={() => { setActiveTab('connections'); setSidebarOpen(false); }} />
+          <SidebarItem active={activeTab === 'mylist'} label="Saved Items" icon={<Bookmark size={16} />} onClick={() => { setActiveTab('mylist'); setSidebarOpen(false); }} />
+          <SidebarItem active={activeTab === 'map_view'} label="Map (All Categories)" icon={<MapIcon size={16} />} onClick={() => { setActiveTab('map_view'); setViewMode('split'); setSidebarOpen(false); }} />
+          <SidebarItem active={showSettings} label="Settings" icon={<Settings size={16} />} onClick={() => { setShowSettings(true); setSidebarOpen(false); }} />
+        </div>
+        <button
+          onClick={() => {
+            setAudienceFilter('all');
+            setRadiusMiles(10);
+            setSortBy(activeTab === 'events' ? 'soonest' : 'distance');
+            setSearchQuery('');
+            setEventWindow('upcoming_only');
+            setIncludePastEvents(false);
+            setIncludeUndatedEvents(false);
+            setEventTypeFilter('all');
+            setCustomDateStart('');
+            setCustomDateEnd('');
+            setFieldOfStudy('all');
+            setAcademicLevel('all');
+            setCareerFocus('all');
+            setIndustry('all');
+            setSeniorityLevel('all');
+            setNetworkingVsTraining('all');
+            setOrgCategoryFilter('all');
+          }}
+          className="w-full mt-4 px-4 py-3 rounded-2xl border border-white/10 bg-white/5 hover:bg-white/10 text-sm"
+        >
+          Reset Filters
+        </button>
+      </aside>
+      {sidebarOpen && <div className="fixed inset-0 bg-black/40 z-[110] md:hidden" onClick={() => setSidebarOpen(false)} />}
+
+      <div className="flex-1 md:ml-72 px-4 py-6 max-w-7xl">
       <header className="mb-8 flex flex-col md:flex-row justify-between items-center gap-6">
         <div className="text-center md:text-left">
+          <button className="md:hidden mb-3 px-3 py-2 rounded-xl bg-white/10 border border-white/10" onClick={() => setSidebarOpen(true)}>
+            Menu
+          </button>
           <motion.h1 
             initial={{ opacity: 0, x: -20 }}
             animate={{ opacity: 1, x: 0 }}
@@ -550,6 +832,9 @@ export default function App() {
             Gratitude
           </motion.h1>
           <p className="opacity-60 font-light italic">Rooted in your neighborhood.</p>
+          <p className="text-xs opacity-55 mt-2">
+            Near: {location ? `${location.latitude.toFixed(3)}, ${location.longitude.toFixed(3)}` : 'Approximate area'}
+          </p>
         </div>
 
         <div className="flex items-center gap-3 bg-white/10 backdrop-blur-md p-2 rounded-2xl border border-white/20 shadow-lg">
@@ -578,54 +863,16 @@ export default function App() {
             >
               <MapIcon size={20} />
             </button>
+            <button
+              onClick={() => setViewMode('split')}
+              aria-label="Split view"
+              className={cn("px-2 rounded-xl transition-all text-xs font-semibold", viewMode === 'split' ? "bg-[#5A5A40] text-white" : "opacity-50 hover:opacity-100")}
+            >
+              Split
+            </button>
           </div>
         </div>
       </header>
-
-      <nav className="flex flex-wrap justify-center gap-2 mb-8 bg-white/5 backdrop-blur-sm p-1.5 rounded-3xl border border-white/10 sticky top-4 z-50 shadow-xl">
-        <TabButton 
-          active={activeTab === 'all'} 
-          onClick={() => setActiveTab('all')}
-          icon={<LayoutGrid size={18} />}
-          label="All"
-        />
-        <TabButton 
-          active={activeTab === 'events'} 
-          onClick={() => setActiveTab('events')}
-          icon={<Calendar size={18} />}
-          label="Events"
-        />
-        <TabButton 
-          active={activeTab === 'volunteer'} 
-          onClick={() => setActiveTab('volunteer')}
-          icon={<Heart size={18} />}
-          label="Volunteer"
-        />
-        <TabButton 
-          active={activeTab === 'foodbanks'} 
-          onClick={() => setActiveTab('foodbanks')}
-          icon={<ShoppingBasket size={18} />}
-          label="Food Banks"
-        />
-        <TabButton 
-          active={activeTab === 'organizations'} 
-          onClick={() => setActiveTab('organizations')}
-          icon={<Building2 size={18} />}
-          label="Organizations"
-        />
-        <TabButton 
-          active={activeTab === 'connections'} 
-          onClick={() => setActiveTab('connections')}
-          icon={<MessageCircle size={18} />}
-          label="Connections"
-        />
-        <TabButton 
-          active={activeTab === 'mylist'} 
-          onClick={() => setActiveTab('mylist')}
-          icon={<Bookmark size={18} />}
-          label="My List"
-        />
-      </nav>
 
       {activeTab !== 'connections' && (
       <div className="mb-8 flex flex-col gap-6">
@@ -673,12 +920,56 @@ export default function App() {
               onChange={(e) => setSortBy(e.target.value as SortBy)}
               className="px-4 py-2 bg-white/5 border border-white/10 rounded-xl text-sm focus:outline-none focus:border-[#5A5A40] transition-all"
             >
+              <option value="soonest">Sort by Soonest</option>
               <option value="distance">Sort by Distance</option>
-              <option value="date">Sort by Date</option>
-              <option value="title">Sort by Name</option>
+              <option value="relevance">Sort by Relevance</option>
+              <option value="newest">Sort by Recently Added</option>
+            </select>
+            <select
+              value={radiusMiles}
+              onChange={(e) => setRadiusMiles(Number(e.target.value))}
+              className="px-4 py-2 bg-white/5 border border-white/10 rounded-xl text-sm focus:outline-none focus:border-[#5A5A40] transition-all"
+            >
+              {[1, 5, 10, 25, 50].map((m) => (
+                <option key={m} value={m}>{m} mi</option>
+              ))}
             </select>
           </div>
         </div>
+
+        {activeTab === 'events' && (
+          <div className="flex flex-wrap items-center gap-2 bg-white/5 p-3 rounded-2xl border border-white/10">
+            <select value={eventWindow} onChange={(e) => setEventWindow(e.target.value as EventWindow)} className="px-3 py-2 bg-white/5 border border-white/10 rounded-xl text-sm">
+              <option value="upcoming_only">Upcoming only</option>
+              <option value="today">Today</option>
+              <option value="this_week">This week</option>
+              <option value="this_month">This month</option>
+              <option value="custom">Custom range</option>
+            </select>
+            {eventWindow === 'custom' && (
+              <>
+                <input type="date" value={customDateStart} onChange={(e) => setCustomDateStart(e.target.value)} className="px-3 py-2 bg-white/5 border border-white/10 rounded-xl text-sm" />
+                <input type="date" value={customDateEnd} onChange={(e) => setCustomDateEnd(e.target.value)} className="px-3 py-2 bg-white/5 border border-white/10 rounded-xl text-sm" />
+              </>
+            )}
+            <select value={eventTypeFilter} onChange={(e) => setEventTypeFilter(e.target.value)} className="px-3 py-2 bg-white/5 border border-white/10 rounded-xl text-sm">
+              <option value="all">All types</option>
+              <option value="event">Event</option>
+              <option value="workshop">Workshop</option>
+              <option value="networking">Networking</option>
+              <option value="class">Class</option>
+              <option value="support_group">Support Group</option>
+            </select>
+            <label className="text-xs opacity-80 flex items-center gap-2 px-2">
+              <input type="checkbox" checked={includeUndatedEvents} onChange={(e) => setIncludeUndatedEvents(e.target.checked)} />
+              Include undated
+            </label>
+            <label className="text-xs opacity-80 flex items-center gap-2 px-2">
+              <input type="checkbox" checked={includePastEvents} onChange={(e) => setIncludePastEvents(e.target.checked)} />
+              Include past events
+            </label>
+          </div>
+        )}
 
         {/* Advanced Filters */}
         <AnimatePresence>
@@ -907,6 +1198,37 @@ export default function App() {
             >
               <MapComponent items={filteredItems} userLocation={location} />
             </motion.div>
+          ) : viewMode === 'split' ? (
+            <motion.div
+              key="split"
+              initial={{ opacity: 0, y: 10 }}
+              animate={{ opacity: 1, y: 0 }}
+              className="grid grid-cols-1 xl:grid-cols-2 gap-6"
+            >
+              <div className="h-[520px] rounded-3xl overflow-hidden border border-white/10 shadow-2xl relative z-0">
+                <MapComponent items={filteredItems} userLocation={location} />
+              </div>
+              <div className="max-h-[520px] overflow-y-auto pr-1">
+                <div className="grid grid-cols-1 gap-4">
+                  {filteredItems.length === 0 ? (
+                    <div className="text-center py-16 border-2 border-dashed border-white/10 rounded-[28px]">
+                      <Filter className="mx-auto opacity-20 mb-4" size={48} />
+                      <p className="opacity-40 text-base font-serif">No items found matching your filters.</p>
+                    </div>
+                  ) : (
+                    filteredItems.map((item) => (
+                      <ResultCard
+                        key={item.id}
+                        item={item}
+                        onToggle={() => toggleMyList(item)}
+                        isSaved={isInList(item.id)}
+                        onViewDetails={() => setSelectedItem(item)}
+                      />
+                    ))
+                  )}
+                </div>
+              </div>
+            </motion.div>
           ) : (
             <motion.div 
               key="grid"
@@ -955,8 +1277,6 @@ export default function App() {
             setReducedMotion={setReducedMotion}
             screenReaderLabels={screenReaderLabels}
             setScreenReaderLabels={setScreenReaderLabels}
-            dyslexiaFont={dyslexiaFont}
-            setDyslexiaFont={setDyslexiaFont}
             onClose={() => setShowSettings(false)} 
           />
         )}
@@ -965,6 +1285,7 @@ export default function App() {
       <footer className="py-12 text-center opacity-30 text-xs border-t border-white/5 mt-20">
         <p>&copy; {new Date().getFullYear()} Gratitude. Rooted in Accessibility & Community.</p>
       </footer>
+    </div>
     </div>
   );
 }
@@ -1175,18 +1496,19 @@ function ConnectionsPanel({
   );
 }
 
-function TagToggle({ active, onClick, label }: { active: boolean, onClick: () => void, label: string }) {
+function SidebarItem({ active, onClick, icon, label }: { active: boolean, onClick: () => void, icon: ReactNode, label: string }) {
   return (
-    <button 
+    <button
       onClick={onClick}
       className={cn(
-        "px-4 py-2 rounded-xl text-xs font-medium transition-all",
-        active 
-          ? "bg-[#5A5A40] text-white" 
-          : "bg-white/5 opacity-40 hover:opacity-100"
+        "w-full flex items-center gap-3 px-4 py-3 rounded-2xl text-sm text-left transition-all border",
+        active
+          ? "bg-[#5A5A40] text-white border-[#5A5A40]"
+          : "bg-transparent border-transparent hover:bg-white/5 opacity-80 hover:opacity-100"
       )}
     >
-      {label}
+      {icon}
+      <span>{label}</span>
     </button>
   );
 }
@@ -1194,7 +1516,7 @@ function TagToggle({ active, onClick, label }: { active: boolean, onClick: () =>
 function SettingsModal({ 
   appearance, setAppearance, accentPreset, setAccentPreset, accentCustomHex, setAccentCustomHex,
   highContrast, setHighContrast, largeTextMode, setLargeTextMode, reducedMotion, setReducedMotion,
-  screenReaderLabels, setScreenReaderLabels, dyslexiaFont, setDyslexiaFont,
+  screenReaderLabels, setScreenReaderLabels,
   onClose 
 }: { 
   appearance: Appearance,
@@ -1211,8 +1533,6 @@ function SettingsModal({
   setReducedMotion: (v: boolean) => void,
   screenReaderLabels: boolean,
   setScreenReaderLabels: (v: boolean) => void,
-  dyslexiaFont: boolean,
-  setDyslexiaFont: (v: boolean) => void,
   onClose: () => void 
 }) {
   return (
@@ -1259,7 +1579,6 @@ function SettingsModal({
                 <AccessibilityToggle active={largeTextMode} onClick={() => setLargeTextMode(!largeTextMode)} label="Large Text Mode" />
                 <AccessibilityToggle active={reducedMotion} onClick={() => setReducedMotion(!reducedMotion)} label="Reduced Motion" />
                 <AccessibilityToggle active={screenReaderLabels} onClick={() => setScreenReaderLabels(!screenReaderLabels)} label="Screen Reader Labels" />
-                <AccessibilityToggle active={dyslexiaFont} onClick={() => setDyslexiaFont(!dyslexiaFont)} label="Dyslexia Friendly Font" />
               </div>
             </div>
 
@@ -1328,23 +1647,6 @@ function AccessibilityToggle({ active, onClick, label }: { active: boolean, onCl
   );
 }
 
-function TabButton({ active, onClick, icon, label }: { active: boolean, onClick: () => void, icon: React.ReactNode, label: string }) {
-  return (
-    <button 
-      onClick={onClick}
-      className={cn(
-        "flex items-center gap-2 px-8 py-3 rounded-2xl text-sm font-medium transition-all duration-500",
-        active 
-          ? "bg-[#5A5A40] text-white shadow-xl shadow-[#5A5A40]/30 scale-105" 
-          : "opacity-50 hover:opacity-100 hover:bg-white/5"
-      )}
-    >
-      {icon}
-      <span className={cn("hidden sm:inline")}>{label}</span>
-    </button>
-  );
-}
-
 function FilterButton({ active, onClick, icon, label }: { active: boolean, onClick: () => void, icon: React.ReactNode, label: string }) {
   return (
     <button 
@@ -1390,9 +1692,11 @@ function ThemeIcon({ active, onClick, icon, label }: { active: boolean, onClick:
 function ResultCard({ item, onToggle, isSaved, onViewDetails }: { item: CommunityItem, onToggle: () => void, isSaved: boolean, onViewDetails: () => void }) {
   const title = item.title || item.name;
   const location = item.location_name || item.address;
-  const date = item.date_start ? new Date(item.date_start).toLocaleString() : (item.date_unknown ? 'Date unknown' : 'Ongoing');
+  const date = formatEventDate(item.date_start, item.date_unknown);
   const distanceMiles = typeof item.distance_miles === 'number' ? item.distance_miles : Number(item.distance_miles);
   const hasDistance = Number.isFinite(distanceMiles);
+  const start = parseDateSafe(item.date_start);
+  const isSoon = !!start && start.getTime() >= Date.now() && start.getTime() <= Date.now() + 72 * 60 * 60 * 1000;
 
   return (
     <motion.div 
@@ -1424,6 +1728,11 @@ function ResultCard({ item, onToggle, isSaved, onViewDetails }: { item: Communit
             {item.needs_review && (
               <span className="text-[10px] uppercase tracking-widest font-bold px-3 py-1 rounded-full bg-yellow-500/10 text-yellow-500">
                 Needs Review
+              </span>
+            )}
+            {isSoon && (
+              <span className="text-[10px] uppercase tracking-widest font-bold px-3 py-1 rounded-full bg-emerald-500/10 text-emerald-400">
+                Soon
               </span>
             )}
           </div>
@@ -1465,6 +1774,12 @@ function ResultCard({ item, onToggle, isSaved, onViewDetails }: { item: Communit
             {distanceMiles.toFixed(1)} miles away
           </div>
         )}
+        {!hasDistance && (
+          <div className="flex items-center gap-3 text-xs opacity-60">
+            <Navigation size={14} />
+            Distance unavailable
+          </div>
+        )}
       </div>
 
       <div className="flex gap-2">
@@ -1493,7 +1808,7 @@ function ResultCard({ item, onToggle, isSaved, onViewDetails }: { item: Communit
 function DetailsModal({ item, onClose }: { item: CommunityItem, onClose: () => void }) {
   const title = item.title || item.name;
   const location = item.location_name || item.address;
-  const date = item.date_start ? new Date(item.date_start).toLocaleString() : (item.date_unknown ? 'Date unknown' : 'Ongoing');
+  const date = formatEventDate(item.date_start, item.date_unknown);
   const distanceMiles = typeof item.distance_miles === 'number' ? item.distance_miles : Number(item.distance_miles);
   const hasDistance = Number.isFinite(distanceMiles);
 
@@ -1566,7 +1881,7 @@ function DetailsModal({ item, onClose }: { item: CommunityItem, onClose: () => v
                 </div>
                 <div>
                   <p className="text-[10px] uppercase tracking-widest font-bold opacity-30 mb-1">Distance</p>
-                  <p className="text-lg opacity-80">{hasDistance ? `${distanceMiles.toFixed(1)} miles away` : 'Unknown'}</p>
+                  <p className="text-lg opacity-80">{hasDistance ? `${distanceMiles.toFixed(1)} miles away` : 'Distance unavailable'}</p>
                 </div>
               </div>
               <div className="flex items-start gap-4">
@@ -1585,6 +1900,23 @@ function DetailsModal({ item, onClose }: { item: CommunityItem, onClose: () => v
             <p className="text-[10px] uppercase tracking-widest font-bold opacity-30 mb-4">Description</p>
             <div className="prose prose-stone dark:prose-invert max-w-none opacity-80 leading-relaxed">
               <ReactMarkdown>{item.description}</ReactMarkdown>
+            </div>
+          </div>
+
+          <div className="mb-10">
+            <p className="text-[10px] uppercase tracking-widest font-bold opacity-30 mb-3">Source</p>
+            <div className="space-y-2 text-sm opacity-80">
+              <p>{item.source_name || 'Not listed'}</p>
+              {item.source_url ? (
+                <a className="text-[#5A5A40] underline break-all" href={item.source_url} target="_blank" rel="noopener noreferrer">
+                  {item.source_url}
+                </a>
+              ) : (
+                <p>Not listed</p>
+              )}
+              <p className="text-xs opacity-60">
+                Retrieved: {item.retrieved_at ? new Date(item.retrieved_at).toLocaleString() : 'Not listed'}
+              </p>
             </div>
           </div>
 
@@ -1628,7 +1960,12 @@ function DetailsModal({ item, onClose }: { item: CommunityItem, onClose: () => v
 }
 
 function MapComponent({ items, userLocation }: { items: CommunityItem[], userLocation: Location | null }) {
-  const center: [number, number] = userLocation ? [userLocation.latitude, userLocation.longitude] : [0, 0];
+  const firstMappable = items.find((item) => (item.latitude ?? item.lat) != null && (item.longitude ?? item.lon) != null);
+  const center: [number, number] = userLocation
+    ? [userLocation.latitude, userLocation.longitude]
+    : firstMappable
+      ? [Number(firstMappable.latitude ?? firstMappable.lat), Number(firstMappable.longitude ?? firstMappable.lon)]
+      : [35.9132, -79.0558];
   
   return (
     <MapContainer center={center} zoom={13} style={{ height: '100%', width: '100%' }}>
@@ -1668,7 +2005,7 @@ function MapComponent({ items, userLocation }: { items: CommunityItem[], userLoc
                 <h4 className="font-serif font-bold text-xl mb-1 leading-tight">{item.title || item.name}</h4>
                 <p className="text-xs opacity-60 mb-3 flex items-center gap-1">
                   <Calendar size={10} />
-                  {item.date_start ? new Date(item.date_start).toLocaleDateString() : (item.date_unknown ? 'Date unknown' : 'Ongoing')}
+                  {formatEventDate(item.date_start, item.date_unknown)}
                 </p>
                 <p className="text-xs opacity-80 mb-4 line-clamp-2">{item.description}</p>
                 <div className="flex justify-between items-center border-t pt-3">
