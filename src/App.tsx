@@ -22,6 +22,7 @@ import {
   RefreshCw,
   Building2,
   Settings,
+  MessageCircle,
   ArrowUpDown,
   Search
 } from 'lucide-react';
@@ -32,7 +33,7 @@ import { twMerge } from 'tailwind-merge';
 import { MapContainer, TileLayer, Marker, Popup, useMap } from 'react-leaflet';
 import L from 'leaflet';
 import { fetchCommunityData, Location, calculateDistance } from './services/geminiService';
-import { CommunityItem } from './types';
+import { CommunityItem, ConnectionProfile, DirectMessage } from './types';
 
 // Fix Leaflet icon issue
 const DefaultIcon = L.icon({
@@ -70,7 +71,7 @@ function getSystemPrefersDark(): boolean {
   return window.matchMedia('(prefers-color-scheme: dark)').matches;
 }
 
-type Tab = 'events' | 'volunteer' | 'foodbanks' | 'organizations' | 'mylist' | 'all';
+type Tab = 'events' | 'volunteer' | 'foodbanks' | 'organizations' | 'connections' | 'mylist' | 'all';
 type Appearance = 'system' | 'light' | 'dark';
 type AccentPreset = 'failover' | 'carolina_blue' | 'custom';
 type AudienceFilter = 'all' | 'student' | 'professional' | 'general' | 'families' | 'seniors';
@@ -78,6 +79,7 @@ type SortBy = 'date' | 'distance' | 'title';
 
 const FAILOVER_ACCENT = '#5A5A40';
 const CAROLINA_BLUE_ACCENT = '#4B9CD3';
+const CURRENT_USER_ID = 'user_me';
 
 export default function App() {
   const [activeTab, setActiveTab] = useState<Tab>('events');
@@ -130,6 +132,25 @@ export default function App() {
       return [];
     }
   });
+  const [connections, setConnections] = useState<ConnectionProfile[]>([]);
+  const [connectionsLoading, setConnectionsLoading] = useState(false);
+  const [connectionsError, setConnectionsError] = useState<string | null>(null);
+  const [connectionNotes, setConnectionNotes] = useState<string[]>([]);
+  const [connectionPage, setConnectionPage] = useState(1);
+  const [connectionTotal, setConnectionTotal] = useState(0);
+  const [connectionRadiusMiles, setConnectionRadiusMiles] = useState(25);
+  const [connectionAudience, setConnectionAudience] = useState<'all' | 'student' | 'professional' | 'general'>('all');
+  const [connectionFieldOfStudy, setConnectionFieldOfStudy] = useState('');
+  const [connectionAcademicLevel, setConnectionAcademicLevel] = useState('');
+  const [connectionIndustry, setConnectionIndustry] = useState('');
+  const [connectionExperienceLevel, setConnectionExperienceLevel] = useState('');
+  const [connectionSkills, setConnectionSkills] = useState('');
+  const [connectionInterests, setConnectionInterests] = useState('');
+  const [connectionSortBy, setConnectionSortBy] = useState<'nearest' | 'most_active' | 'newest_members' | 'shared_interests'>('nearest');
+  const [selectedConnection, setSelectedConnection] = useState<ConnectionProfile | null>(null);
+  const [messages, setMessages] = useState<DirectMessage[]>([]);
+  const [messagesLoading, setMessagesLoading] = useState(false);
+  const [messageDraft, setMessageDraft] = useState('');
 
   useEffect(() => {
     if (typeof window === 'undefined' || typeof window.matchMedia !== 'function') {
@@ -191,6 +212,92 @@ export default function App() {
       );
     }
   }, []);
+
+  const CONNECTION_PAGE_SIZE = 8;
+
+  const fetchConnections = async (page = connectionPage) => {
+    if (!location) {
+      setConnections([]);
+      setConnectionTotal(0);
+      setConnectionNotes(["Enable location access or provide your city/ZIP to discover nearby users."]);
+      return;
+    }
+
+    setConnectionsLoading(true);
+    setConnectionsError(null);
+    try {
+      const response = await fetch('/api/connections/search', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          current_user_id: CURRENT_USER_ID,
+          location,
+          page,
+          page_size: CONNECTION_PAGE_SIZE,
+          filters: {
+            radius_miles: connectionRadiusMiles,
+            audience_type: connectionAudience,
+            field_of_study: connectionFieldOfStudy,
+            academic_level: connectionAcademicLevel,
+            industry: connectionIndustry,
+            experience_level: connectionExperienceLevel,
+            skills: connectionSkills,
+            interests: connectionInterests,
+            sort_by: connectionSortBy,
+          },
+        }),
+      });
+
+      const data = await response.json();
+      setConnections(data.connections || []);
+      setConnectionTotal(data.total || 0);
+      setConnectionNotes(data.notes || []);
+    } catch (err) {
+      console.error('Connections search failed', err);
+      setConnectionsError('Failed to load nearby users.');
+    } finally {
+      setConnectionsLoading(false);
+    }
+  };
+
+  const fetchMessages = async (peerId: string) => {
+    setMessagesLoading(true);
+    try {
+      const response = await fetch(`/api/messages/${peerId}?current_user_id=${CURRENT_USER_ID}`);
+      const data = await response.json();
+      setMessages(data.messages || []);
+    } catch (err) {
+      console.error('Failed to load messages', err);
+    } finally {
+      setMessagesLoading(false);
+    }
+  };
+
+  const sendMessage = async () => {
+    if (!selectedConnection || !messageDraft.trim()) return;
+    try {
+      const response = await fetch('/api/messages', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          current_user_id: CURRENT_USER_ID,
+          sender_id: CURRENT_USER_ID,
+          receiver_id: selectedConnection.user_id,
+          message_text: messageDraft.trim(),
+        }),
+      });
+      const data = await response.json();
+      if (!response.ok) {
+        setConnectionsError(data.error || 'Could not send message.');
+        return;
+      }
+      setMessages((prev) => [...prev, data.message]);
+      setMessageDraft('');
+    } catch (err) {
+      console.error('Failed to send message', err);
+      setConnectionsError('Could not send message.');
+    }
+  };
 
   const handleSearch = async (tab: Tab, forceRefresh = false) => {
     setLoading(true);
@@ -286,10 +393,53 @@ export default function App() {
   };
 
   useEffect(() => {
-    if (activeTab !== 'mylist') {
+    if (activeTab !== 'mylist' && activeTab !== 'connections') {
       handleSearch(activeTab);
     }
   }, [activeTab, location]);
+
+  useEffect(() => {
+    if (activeTab !== 'connections') return;
+    setConnectionPage(1);
+  }, [
+    activeTab,
+    connectionRadiusMiles,
+    connectionAudience,
+    connectionFieldOfStudy,
+    connectionAcademicLevel,
+    connectionIndustry,
+    connectionExperienceLevel,
+    connectionSkills,
+    connectionInterests,
+    connectionSortBy,
+  ]);
+
+  useEffect(() => {
+    if (activeTab !== 'connections') return;
+    fetchConnections(connectionPage);
+  }, [
+    activeTab,
+    connectionPage,
+    location,
+    connectionRadiusMiles,
+    connectionAudience,
+    connectionFieldOfStudy,
+    connectionAcademicLevel,
+    connectionIndustry,
+    connectionExperienceLevel,
+    connectionSkills,
+    connectionInterests,
+    connectionSortBy,
+  ]);
+
+  useEffect(() => {
+    if (!selectedConnection || activeTab !== 'connections') return;
+    fetchMessages(selectedConnection.user_id);
+    const interval = setInterval(() => {
+      fetchMessages(selectedConnection.user_id);
+    }, 8000);
+    return () => clearInterval(interval);
+  }, [selectedConnection, activeTab]);
 
   const filteredItems = useMemo(() => {
     const list = activeTab === 'mylist' ? myList : items;
@@ -397,7 +547,7 @@ export default function App() {
             animate={{ opacity: 1, x: 0 }}
             className="text-5xl font-serif font-light tracking-tight mb-1"
           >
-            Communitree
+            Gratitude
           </motion.h1>
           <p className="opacity-60 font-light italic">Rooted in your neighborhood.</p>
         </div>
@@ -464,6 +614,12 @@ export default function App() {
           label="Organizations"
         />
         <TabButton 
+          active={activeTab === 'connections'} 
+          onClick={() => setActiveTab('connections')}
+          icon={<MessageCircle size={18} />}
+          label="Connections"
+        />
+        <TabButton 
           active={activeTab === 'mylist'} 
           onClick={() => setActiveTab('mylist')}
           icon={<Bookmark size={18} />}
@@ -471,6 +627,7 @@ export default function App() {
         />
       </nav>
 
+      {activeTab !== 'connections' && (
       <div className="mb-8 flex flex-col gap-6">
         <div className="flex flex-wrap items-center justify-between gap-4">
           <div className="flex items-center gap-2 bg-white/5 p-1 rounded-2xl border border-white/10">
@@ -672,10 +829,50 @@ export default function App() {
           </div>
         </div>
       </div>
+      )}
 
       <main className="flex-1 relative min-h-[500px]">
         <AnimatePresence mode="wait">
-          {loading ? (
+          {activeTab === 'connections' ? (
+            <ConnectionsPanel
+              connections={connections}
+              loading={connectionsLoading}
+              error={connectionsError}
+              notes={connectionNotes}
+              page={connectionPage}
+              pageSize={CONNECTION_PAGE_SIZE}
+              total={connectionTotal}
+              radiusMiles={connectionRadiusMiles}
+              setRadiusMiles={setConnectionRadiusMiles}
+              audience={connectionAudience}
+              setAudience={setConnectionAudience}
+              fieldOfStudy={connectionFieldOfStudy}
+              setFieldOfStudy={setConnectionFieldOfStudy}
+              academicLevel={connectionAcademicLevel}
+              setAcademicLevel={setConnectionAcademicLevel}
+              industry={connectionIndustry}
+              setIndustry={setConnectionIndustry}
+              experienceLevel={connectionExperienceLevel}
+              setExperienceLevel={setConnectionExperienceLevel}
+              skills={connectionSkills}
+              setSkills={setConnectionSkills}
+              interests={connectionInterests}
+              setInterests={setConnectionInterests}
+              sortBy={connectionSortBy}
+              setSortBy={setConnectionSortBy}
+              onPageChange={setConnectionPage}
+              selectedConnection={selectedConnection}
+              onSelectConnection={(connection) => {
+                setSelectedConnection(connection);
+                fetchMessages(connection.user_id);
+              }}
+              messages={messages}
+              messagesLoading={messagesLoading}
+              messageDraft={messageDraft}
+              setMessageDraft={setMessageDraft}
+              onSendMessage={sendMessage}
+            />
+          ) : loading ? (
             <motion.div 
               key="loading"
               initial={{ opacity: 0 }}
@@ -766,8 +963,214 @@ export default function App() {
       </AnimatePresence>
 
       <footer className="py-12 text-center opacity-30 text-xs border-t border-white/5 mt-20">
-        <p>&copy; {new Date().getFullYear()} Communitree. Rooted in Accessibility & Community.</p>
+        <p>&copy; {new Date().getFullYear()} Gratitude. Rooted in Accessibility & Community.</p>
       </footer>
+    </div>
+  );
+}
+
+function ConnectionsPanel({
+  connections,
+  loading,
+  error,
+  notes,
+  page,
+  pageSize,
+  total,
+  radiusMiles,
+  setRadiusMiles,
+  audience,
+  setAudience,
+  fieldOfStudy,
+  setFieldOfStudy,
+  academicLevel,
+  setAcademicLevel,
+  industry,
+  setIndustry,
+  experienceLevel,
+  setExperienceLevel,
+  skills,
+  setSkills,
+  interests,
+  setInterests,
+  sortBy,
+  setSortBy,
+  onPageChange,
+  selectedConnection,
+  onSelectConnection,
+  messages,
+  messagesLoading,
+  messageDraft,
+  setMessageDraft,
+  onSendMessage,
+}: {
+  connections: ConnectionProfile[];
+  loading: boolean;
+  error: string | null;
+  notes: string[];
+  page: number;
+  pageSize: number;
+  total: number;
+  radiusMiles: number;
+  setRadiusMiles: (value: number) => void;
+  audience: 'all' | 'student' | 'professional' | 'general';
+  setAudience: (value: 'all' | 'student' | 'professional' | 'general') => void;
+  fieldOfStudy: string;
+  setFieldOfStudy: (value: string) => void;
+  academicLevel: string;
+  setAcademicLevel: (value: string) => void;
+  industry: string;
+  setIndustry: (value: string) => void;
+  experienceLevel: string;
+  setExperienceLevel: (value: string) => void;
+  skills: string;
+  setSkills: (value: string) => void;
+  interests: string;
+  setInterests: (value: string) => void;
+  sortBy: 'nearest' | 'most_active' | 'newest_members' | 'shared_interests';
+  setSortBy: (value: 'nearest' | 'most_active' | 'newest_members' | 'shared_interests') => void;
+  onPageChange: (value: number) => void;
+  selectedConnection: ConnectionProfile | null;
+  onSelectConnection: (connection: ConnectionProfile) => void;
+  messages: DirectMessage[];
+  messagesLoading: boolean;
+  messageDraft: string;
+  setMessageDraft: (value: string) => void;
+  onSendMessage: () => void;
+}) {
+  const totalPages = Math.max(1, Math.ceil(total / pageSize));
+
+  return (
+    <div className="space-y-6">
+      <div className="bg-white/5 p-5 rounded-3xl border border-white/10">
+        <div className="grid grid-cols-1 md:grid-cols-4 gap-3">
+          <select value={radiusMiles} onChange={(e) => setRadiusMiles(Number(e.target.value))} className="px-3 py-2 bg-white/5 border border-white/10 rounded-xl text-sm">
+            {[5, 10, 25, 50].map((r) => <option key={r} value={r}>{r} miles</option>)}
+          </select>
+          <select value={audience} onChange={(e) => setAudience(e.target.value as 'all' | 'student' | 'professional' | 'general')} className="px-3 py-2 bg-white/5 border border-white/10 rounded-xl text-sm">
+            <option value="all">All Audiences</option>
+            <option value="student">Students</option>
+            <option value="professional">Professionals</option>
+            <option value="general">General</option>
+          </select>
+          <input value={fieldOfStudy} onChange={(e) => setFieldOfStudy(e.target.value)} placeholder="Field of study" className="px-3 py-2 bg-white/5 border border-white/10 rounded-xl text-sm" />
+          <input value={industry} onChange={(e) => setIndustry(e.target.value)} placeholder="Industry" className="px-3 py-2 bg-white/5 border border-white/10 rounded-xl text-sm" />
+          <input value={skills} onChange={(e) => setSkills(e.target.value)} placeholder="Skills" className="px-3 py-2 bg-white/5 border border-white/10 rounded-xl text-sm" />
+          <input value={interests} onChange={(e) => setInterests(e.target.value)} placeholder="Interests" className="px-3 py-2 bg-white/5 border border-white/10 rounded-xl text-sm" />
+          <select value={academicLevel} onChange={(e) => setAcademicLevel(e.target.value)} className="px-3 py-2 bg-white/5 border border-white/10 rounded-xl text-sm">
+            <option value="">Academic level</option>
+            <option value="undergrad">Undergrad</option>
+            <option value="grad">Grad</option>
+          </select>
+          <select value={experienceLevel} onChange={(e) => setExperienceLevel(e.target.value)} className="px-3 py-2 bg-white/5 border border-white/10 rounded-xl text-sm">
+            <option value="">Experience level</option>
+            <option value="entry">Entry</option>
+            <option value="mid">Mid</option>
+            <option value="senior">Senior</option>
+          </select>
+        </div>
+        <div className="mt-3">
+          <select value={sortBy} onChange={(e) => setSortBy(e.target.value as 'nearest' | 'most_active' | 'newest_members' | 'shared_interests')} className="px-3 py-2 bg-white/5 border border-white/10 rounded-xl text-sm">
+            <option value="nearest">Nearest</option>
+            <option value="most_active">Most Active</option>
+            <option value="newest_members">Newest Members</option>
+            <option value="shared_interests">Shared Interests</option>
+          </select>
+        </div>
+      </div>
+
+      {error && <div className="p-4 rounded-2xl bg-red-500/10 border border-red-500/20 text-red-300 text-sm">{error}</div>}
+      {notes.length > 0 && (
+        <div className="p-4 rounded-2xl bg-white/5 border border-white/10 text-sm opacity-80">
+          {notes.join(" ")}
+        </div>
+      )}
+
+      <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+        <div className="lg:col-span-2 grid grid-cols-1 md:grid-cols-2 gap-4">
+          {loading ? (
+            <div className="col-span-full text-center py-16 opacity-60">Loading nearby connections...</div>
+          ) : connections.length === 0 ? (
+            <div className="col-span-full text-center py-16 opacity-60">No matching users. Try widening your radius or removing filters.</div>
+          ) : (
+            connections.map((connection) => (
+              <button
+                key={connection.user_id}
+                onClick={() => onSelectConnection(connection)}
+                className={cn(
+                  "text-left p-5 rounded-2xl border border-white/10 bg-white/5 hover:bg-white/10 transition-all",
+                  selectedConnection?.user_id === connection.user_id && "ring-2 ring-[#5A5A40]"
+                )}
+              >
+                <div className="flex justify-between items-start gap-3">
+                  <div>
+                    <h3 className="font-serif text-xl">{connection.display_name}</h3>
+                    <p className="text-xs opacity-60 capitalize">{connection.audience_type}</p>
+                  </div>
+                  <span className="text-xs opacity-70">
+                    {connection.distance_miles != null ? `${connection.distance_miles} mi` : 'Distance hidden'}
+                  </span>
+                </div>
+                <p className="text-sm mt-3 opacity-80 line-clamp-2">{connection.profile_summary}</p>
+                <p className="text-xs mt-3 opacity-60">Shared: {connection.shared_interests.join(', ') || 'None yet'}</p>
+              </button>
+            ))
+          )}
+        </div>
+
+        <div className="bg-white/5 border border-white/10 rounded-2xl p-4 h-[560px] flex flex-col">
+          {!selectedConnection ? (
+            <div className="m-auto text-center opacity-60">Select a connection to view or send messages.</div>
+          ) : (
+            <>
+              <div className="pb-3 border-b border-white/10">
+                <h3 className="font-serif text-xl">{selectedConnection.display_name}</h3>
+                <p className="text-xs opacity-60">Direct messages</p>
+              </div>
+              <div className="flex-1 overflow-y-auto py-3 space-y-2">
+                {messagesLoading ? (
+                  <div className="opacity-60 text-sm">Loading messages...</div>
+                ) : messages.length === 0 ? (
+                  <div className="opacity-60 text-sm">No messages yet. Say hello.</div>
+                ) : (
+                  messages.map((message) => (
+                    <div key={message.message_id} className={cn(
+                      "p-2 rounded-lg text-sm",
+                      message.sender_id === CURRENT_USER_ID ? "bg-[#5A5A40]/20 ml-6" : "bg-white/10 mr-6"
+                    )}>
+                      <p>{message.message_text}</p>
+                      <p className="text-[10px] opacity-60 mt-1">{new Date(message.timestamp).toLocaleString()}</p>
+                    </div>
+                  ))
+                )}
+              </div>
+              <div className="pt-3 border-t border-white/10 flex gap-2">
+                <input
+                  value={messageDraft}
+                  onChange={(e) => setMessageDraft(e.target.value)}
+                  placeholder="Type a message"
+                  className="flex-1 px-3 py-2 bg-white/5 border border-white/10 rounded-xl text-sm"
+                />
+                <button onClick={onSendMessage} className="px-4 py-2 rounded-xl bg-[#5A5A40] text-white text-sm">
+                  Send
+                </button>
+              </div>
+            </>
+          )}
+        </div>
+      </div>
+
+      <div className="flex items-center justify-between">
+        <p className="text-xs opacity-60">Showing page {page} of {totalPages} ({total} users)</p>
+        <div className="flex gap-2">
+          <button onClick={() => onPageChange(Math.max(1, page - 1))} disabled={page <= 1} className="px-3 py-1 rounded-lg bg-white/5 disabled:opacity-30">
+            Prev
+          </button>
+          <button onClick={() => onPageChange(Math.min(totalPages, page + 1))} disabled={page >= totalPages} className="px-3 py-1 rounded-lg bg-white/5 disabled:opacity-30">
+            Next
+          </button>
+        </div>
+      </div>
     </div>
   );
 }
@@ -988,6 +1391,8 @@ function ResultCard({ item, onToggle, isSaved, onViewDetails }: { item: Communit
   const title = item.title || item.name;
   const location = item.location_name || item.address;
   const date = item.date_start ? new Date(item.date_start).toLocaleString() : (item.date_unknown ? 'Date unknown' : 'Ongoing');
+  const distanceMiles = typeof item.distance_miles === 'number' ? item.distance_miles : Number(item.distance_miles);
+  const hasDistance = Number.isFinite(distanceMiles);
 
   return (
     <motion.div 
@@ -1054,10 +1459,10 @@ function ResultCard({ item, onToggle, isSaved, onViewDetails }: { item: Communit
             {item.phone}
           </div>
         )}
-        {item.distance_miles !== undefined && (
+        {hasDistance && (
           <div className="flex items-center gap-3 text-xs text-[#5A5A40] font-bold">
             <Navigation size={14} />
-            {item.distance_miles.toFixed(1)} miles away
+            {distanceMiles.toFixed(1)} miles away
           </div>
         )}
       </div>
@@ -1089,6 +1494,8 @@ function DetailsModal({ item, onClose }: { item: CommunityItem, onClose: () => v
   const title = item.title || item.name;
   const location = item.location_name || item.address;
   const date = item.date_start ? new Date(item.date_start).toLocaleString() : (item.date_unknown ? 'Date unknown' : 'Ongoing');
+  const distanceMiles = typeof item.distance_miles === 'number' ? item.distance_miles : Number(item.distance_miles);
+  const hasDistance = Number.isFinite(distanceMiles);
 
   return (
     <motion.div 
@@ -1159,7 +1566,7 @@ function DetailsModal({ item, onClose }: { item: CommunityItem, onClose: () => v
                 </div>
                 <div>
                   <p className="text-[10px] uppercase tracking-widest font-bold opacity-30 mb-1">Distance</p>
-                  <p className="text-lg opacity-80">{item.distance_miles ? `${item.distance_miles.toFixed(1)} miles away` : 'Unknown'}</p>
+                  <p className="text-lg opacity-80">{hasDistance ? `${distanceMiles.toFixed(1)} miles away` : 'Unknown'}</p>
                 </div>
               </div>
               <div className="flex items-start gap-4">
@@ -1237,6 +1644,8 @@ function MapComponent({ items, userLocation }: { items: CommunityItem[], userLoc
       {items.map((item) => {
         const lat = item.latitude || item.lat;
         const lon = item.longitude || item.lon;
+        const distanceMiles = typeof item.distance_miles === 'number' ? item.distance_miles : Number(item.distance_miles);
+        const hasDistance = Number.isFinite(distanceMiles);
         if (lat == null || lon == null) return null;
 
         return (
@@ -1252,8 +1661,8 @@ function MapComponent({ items, userLocation }: { items: CommunityItem[], userLoc
                   )}>
                     {item.type.replace('_', ' ')}
                   </span>
-                  {item.distance_miles !== undefined && (
-                    <span className="text-[8px] font-bold opacity-40">{item.distance_miles.toFixed(1)} mi</span>
+                  {hasDistance && (
+                    <span className="text-[8px] font-bold opacity-40">{distanceMiles.toFixed(1)} mi</span>
                   )}
                 </div>
                 <h4 className="font-serif font-bold text-xl mb-1 leading-tight">{item.title || item.name}</h4>

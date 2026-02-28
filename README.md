@@ -1,6 +1,6 @@
-# Communitree
+# Gratitude
 
-Communitree is a Vite + React + Express app for discovering local community resources.
+Gratitude is a Vite + React + Express app for discovering local community resources.
 
 ## Prerequisites
 
@@ -23,6 +23,9 @@ Communitree is a Vite + React + Express app for discovering local community reso
    - `OPENAI_API_KEY` (optional failover)
    - `SCRAPER_SOURCES` (recommended deterministic fallback feeds)
    - `SCRAPER_TIMEOUT_MS` (optional per-source timeout)
+   - `SCRAPER_RADIUS_MILES` (optional API-source radius)
+   - `TICKETMASTER_API_KEY` (optional API source)
+   - `EVENTBRITE_API_TOKEN` (optional API source)
 
 ### Deterministic Scraper Fallback (AI-off mode)
 
@@ -35,12 +38,17 @@ Configure `SCRAPER_SOURCES` in `.env`:
 ```env
 SCRAPER_SOURCES="City Calendar|https://your-city.gov/events.rss,University Calendar|https://calendar.yourschool.edu/events.ics"
 SCRAPER_TIMEOUT_MS=10000
+SCRAPER_RADIUS_MILES=25
+TICKETMASTER_API_KEY=your_ticketmaster_key
+EVENTBRITE_API_TOKEN=your_eventbrite_token
 ```
 
 Notes:
 - Add multiple high-quality official feeds for best coverage.
 - Fallback scraper classifies type/audience with deterministic keyword rules.
 - Source URL provenance is retained per listing.
+- Nearby college feeds preconfigured in this project include UNC, NC State, and Duke.
+- API-key sources now supported in fallback mode: Ticketmaster and Eventbrite.
 
 ## Run Locally (Cross-Platform)
 

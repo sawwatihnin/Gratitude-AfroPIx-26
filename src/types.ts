@@ -54,3 +54,27 @@ export interface GroundingChunk {
     title: string;
   };
 }
+
+export interface ConnectionProfile {
+  user_id: string;
+  display_name: string;
+  audience_type: 'student' | 'professional' | 'general';
+  distance_miles: number | null;
+  field_of_study?: string;
+  industry?: string;
+  skills: string[];
+  interests: string[];
+  shared_interests: string[];
+  profile_summary: string;
+  profile_color_theme?: string;
+  last_active: string;
+}
+
+export interface DirectMessage {
+  message_id: string;
+  sender_id: string;
+  receiver_id: string;
+  timestamp: string;
+  message_text: string;
+  read_status: boolean;
+}

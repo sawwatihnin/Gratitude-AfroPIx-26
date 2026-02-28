@@ -7,6 +7,17 @@ type ErrorBoundaryState = {
   message: string;
 };
 
+function formatUnknownError(error: unknown): string {
+  if (error instanceof Error) {
+    return `${error.message}\n${error.stack || ''}`.trim();
+  }
+  try {
+    return JSON.stringify(error, null, 2);
+  } catch {
+    return String(error);
+  }
+}
+
 class AppErrorBoundary extends React.Component<React.PropsWithChildren, ErrorBoundaryState> {
   state: ErrorBoundaryState = {
     hasError: false,
@@ -16,13 +27,17 @@ class AppErrorBoundary extends React.Component<React.PropsWithChildren, ErrorBou
   static getDerivedStateFromError(error: unknown): ErrorBoundaryState {
     return {
       hasError: true,
-      message: error instanceof Error ? error.message : 'Unknown runtime error',
+      message: formatUnknownError(error) || 'Unknown runtime error',
     };
   }
 
   componentDidCatch(error: unknown, info: React.ErrorInfo) {
     // Keep full details in console for debugging.
     console.error('App render crash:', error, info);
+    this.setState({
+      hasError: true,
+      message: `${formatUnknownError(error)}\n\nComponent stack:\n${info.componentStack || '(none)'}`.trim(),
+    });
   }
 
   render() {
@@ -67,7 +82,7 @@ async function bootstrap() {
       </StrictMode>,
     );
   } catch (error) {
-    const message = error instanceof Error ? `${error.message}\n${error.stack || ''}` : String(error);
+    const message = formatUnknownError(error);
     console.error('Bootstrap/import crash:', error);
     root.render(
       <div style={{padding: '24px', fontFamily: 'system-ui, sans-serif', lineHeight: 1.5}}>

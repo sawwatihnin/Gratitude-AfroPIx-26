@@ -6,6 +6,7 @@ import Database from "better-sqlite3";
 import fs from "fs";
 import path from "path";
 import { fileURLToPath } from "url";
+import { randomUUID } from "crypto";
 import OpenAI from "openai";
 import dotenv from "dotenv";
 
@@ -16,6 +17,231 @@ const __dirname = path.dirname(__filename);
 
 const db = new Database("community.db");
 const scraperCache = new Map();
+const CURRENT_USER_ID = "user_me";
+
+const simulatedProfiles = [
+  {
+    user_id: "user_me",
+    display_name: "You",
+    audience_type: "general",
+    location: { lat: 35.9132, lon: -79.0558, region: "Chapel Hill, NC" },
+    field_of_study: "",
+    academic_level: "any",
+    graduation_year: null,
+    industry: "",
+    job_title: "",
+    experience_level: "entry",
+    skills: ["community outreach", "event planning", "volunteering"],
+    interests: ["food banks", "career growth", "networking"],
+    organization_memberships: ["Orange County Volunteers"],
+    availability: "weekends",
+    event_participation_history: ["volunteer", "networking"],
+    bio: "Local community member looking to connect and collaborate.",
+    profile_color_theme: "#5A5A40",
+    joined_date: "2026-01-15T12:00:00.000Z",
+    last_active: "2026-02-28T18:00:00.000Z",
+    profile_visibility: "public",
+    messaging_permission: "anyone",
+    location_visibility: "exact_distance",
+  },
+  {
+    user_id: "user_anna",
+    display_name: "Anna Kim",
+    audience_type: "student",
+    location: { lat: 35.9096, lon: -79.0512, region: "Chapel Hill, NC" },
+    field_of_study: "Computer Science",
+    academic_level: "undergrad",
+    graduation_year: 2027,
+    industry: "",
+    job_title: "",
+    experience_level: "entry",
+    skills: ["python", "frontend", "tutoring"],
+    interests: ["hackathons", "food banks", "study groups"],
+    organization_memberships: ["UNC Tech Club"],
+    availability: "evenings",
+    event_participation_history: ["class", "volunteer"],
+    bio: "CS student who likes building tools for local nonprofits.",
+    profile_color_theme: "#4B9CD3",
+    joined_date: "2026-02-01T10:00:00.000Z",
+    last_active: "2026-02-28T17:45:00.000Z",
+    profile_visibility: "public",
+    messaging_permission: "nearby_users",
+    location_visibility: "exact_distance",
+  },
+  {
+    user_id: "user_mike",
+    display_name: "Mike Torres",
+    audience_type: "professional",
+    location: { lat: 35.9940, lon: -78.8986, region: "Durham, NC" },
+    field_of_study: "",
+    academic_level: "any",
+    graduation_year: null,
+    industry: "Technology",
+    job_title: "Software Engineer",
+    experience_level: "mid",
+    skills: ["backend", "cloud", "mentoring"],
+    interests: ["networking", "career fairs", "open source"],
+    organization_memberships: ["Triangle Devs"],
+    availability: "weeknights",
+    event_participation_history: ["networking", "workshop"],
+    bio: "Tech professional interested in mentorship and civic projects.",
+    profile_color_theme: "#2E7D32",
+    joined_date: "2026-01-05T09:00:00.000Z",
+    last_active: "2026-02-28T16:30:00.000Z",
+    profile_visibility: "public",
+    messaging_permission: "anyone",
+    location_visibility: "approximate_area",
+  },
+  {
+    user_id: "user_sara",
+    display_name: "Sara Patel",
+    audience_type: "professional",
+    location: { lat: 35.7796, lon: -78.6382, region: "Raleigh, NC" },
+    field_of_study: "",
+    academic_level: "any",
+    graduation_year: null,
+    industry: "Healthcare",
+    job_title: "Program Manager",
+    experience_level: "senior",
+    skills: ["operations", "fundraising", "community health"],
+    interests: ["clinics", "domestic violence resources", "volunteering"],
+    organization_memberships: ["NC Care Network"],
+    availability: "weekends",
+    event_participation_history: ["clinic", "support_group"],
+    bio: "Building health access programs across the Triangle.",
+    profile_color_theme: "#D97706",
+    joined_date: "2025-12-10T08:30:00.000Z",
+    last_active: "2026-02-27T22:15:00.000Z",
+    profile_visibility: "nearby_only",
+    messaging_permission: "connections_only",
+    location_visibility: "exact_distance",
+  },
+  {
+    user_id: "user_jamal",
+    display_name: "Jamal Reed",
+    audience_type: "general",
+    location: { lat: 35.9251, lon: -79.0370, region: "Chapel Hill, NC" },
+    field_of_study: "",
+    academic_level: "any",
+    graduation_year: null,
+    industry: "",
+    job_title: "",
+    experience_level: "entry",
+    skills: ["volunteer coordination", "logistics"],
+    interests: ["food assistance", "shelters", "resource centers"],
+    organization_memberships: ["Triangle Food Relief"],
+    availability: "mornings",
+    event_participation_history: ["foodbank", "donation"],
+    bio: "Volunteer organizer focused on food and shelter access.",
+    profile_color_theme: "#3B82F6",
+    joined_date: "2026-01-22T14:00:00.000Z",
+    last_active: "2026-02-28T15:10:00.000Z",
+    profile_visibility: "public",
+    messaging_permission: "nearby_users",
+    location_visibility: "exact_distance",
+  },
+  {
+    user_id: "user_emily",
+    display_name: "Emily Chen",
+    audience_type: "student",
+    location: { lat: 35.9980, lon: -78.9400, region: "Durham, NC" },
+    field_of_study: "Public Policy",
+    academic_level: "grad",
+    graduation_year: 2026,
+    industry: "",
+    job_title: "",
+    experience_level: "entry",
+    skills: ["research", "policy writing", "community engagement"],
+    interests: ["legal aid", "advocacy", "workshops"],
+    organization_memberships: ["Policy Student Association"],
+    availability: "afternoons",
+    event_participation_history: ["workshop", "legal_aid"],
+    bio: "Grad student interested in legal aid and civic participation.",
+    profile_color_theme: "#8B5CF6",
+    joined_date: "2026-02-10T11:00:00.000Z",
+    last_active: "2026-02-28T13:20:00.000Z",
+    profile_visibility: "public",
+    messaging_permission: "anyone",
+    location_visibility: "hidden",
+  },
+  {
+    user_id: "user_carlos",
+    display_name: "Carlos Vega",
+    audience_type: "professional",
+    location: { lat: 35.8700, lon: -78.7800, region: "Morrisville, NC" },
+    field_of_study: "",
+    academic_level: "any",
+    graduation_year: null,
+    industry: "Technology",
+    job_title: "Product Designer",
+    experience_level: "mid",
+    skills: ["ux", "facilitation", "design systems"],
+    interests: ["networking", "workshops", "mentoring"],
+    organization_memberships: ["Triangle Product Guild"],
+    availability: "weeknights",
+    event_participation_history: ["workshop", "networking"],
+    bio: "Designer hosting portfolio review circles and meetup sessions.",
+    profile_color_theme: "#06B6D4",
+    joined_date: "2026-01-28T09:15:00.000Z",
+    last_active: "2026-02-28T12:00:00.000Z",
+    profile_visibility: "public",
+    messaging_permission: "anyone",
+    location_visibility: "approximate_area",
+  },
+  {
+    user_id: "user_nina",
+    display_name: "Nina Foster",
+    audience_type: "general",
+    location: { lat: 35.9130, lon: -79.0700, region: "Chapel Hill, NC" },
+    field_of_study: "",
+    academic_level: "any",
+    graduation_year: null,
+    industry: "",
+    job_title: "",
+    experience_level: "entry",
+    skills: ["outreach", "event hosting"],
+    interests: ["families", "resource centers", "support groups"],
+    organization_memberships: ["Neighborhood Mutual Aid"],
+    availability: "weekends",
+    event_participation_history: ["support_group", "resource_center"],
+    bio: "Community host for family support and local resource sharing.",
+    profile_color_theme: "#EC4899",
+    joined_date: "2026-02-05T16:45:00.000Z",
+    last_active: "2026-02-28T14:40:00.000Z",
+    profile_visibility: "nearby_only",
+    messaging_permission: "nearby_users",
+    location_visibility: "exact_distance",
+  },
+];
+
+const simulatedConnectionKeys = new Set([
+  ["user_me", "user_anna"].sort().join("|"),
+  ["user_me", "user_mike"].sort().join("|"),
+  ["user_me", "user_jamal"].sort().join("|"),
+]);
+
+const simulatedBlockKeys = new Set([
+  "user_sara|user_me",
+]);
+
+const simulatedMessages = [
+  {
+    message_id: randomUUID(),
+    sender_id: "user_anna",
+    receiver_id: "user_me",
+    timestamp: "2026-02-28T17:20:00.000Z",
+    message_text: "Hey! Are you joining the volunteer orientation this weekend?",
+    read_status: false,
+  },
+  {
+    message_id: randomUUID(),
+    sender_id: "user_me",
+    receiver_id: "user_mike",
+    timestamp: "2026-02-28T16:30:00.000Z",
+    message_text: "Would love to connect about mentorship opportunities.",
+    read_status: true,
+  },
+];
 
 // Initialize database
 db.exec(`
@@ -67,6 +293,32 @@ function normalizeText(value) {
   return (value || "").replace(/\s+/g, " ").trim();
 }
 
+function calculateDistanceMiles(lat1, lon1, lat2, lon2) {
+  const R = 3958.8;
+  const dLat = ((lat2 - lat1) * Math.PI) / 180;
+  const dLon = ((lon2 - lon1) * Math.PI) / 180;
+  const a =
+    Math.sin(dLat / 2) ** 2 +
+    Math.cos((lat1 * Math.PI) / 180) *
+      Math.cos((lat2 * Math.PI) / 180) *
+      Math.sin(dLon / 2) ** 2;
+  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+  return R * c;
+}
+
+function isConnection(a, b) {
+  return simulatedConnectionKeys.has([a, b].sort().join("|"));
+}
+
+function isBlocked(viewerId, otherId) {
+  return simulatedBlockKeys.has(`${viewerId}|${otherId}`) || simulatedBlockKeys.has(`${otherId}|${viewerId}`);
+}
+
+function sharedValues(a = [], b = []) {
+  const setB = new Set((b || []).map((v) => v.toLowerCase()));
+  return (a || []).filter((v) => setB.has(v.toLowerCase()));
+}
+
 function decodeHtml(value) {
   return normalizeText(
     value
@@ -89,9 +341,9 @@ function tagValue(block, tagNames) {
   return "";
 }
 
-function canonicalUrl(raw) {
+function canonicalUrl(raw, base) {
   try {
-    const url = new URL(raw);
+    const url = base ? new URL(raw, base) : new URL(raw);
     url.hash = "";
     return url.toString();
   } catch {
@@ -166,7 +418,7 @@ function parseRssOrAtom(xml, sourceName, sourceUrl) {
     const title = tagValue(block, ["title"]) || `${sourceName} Listing ${idx + 1}`;
     const descriptionRaw = tagValue(block, ["description", "summary", "content"]);
     const linkTag = block.match(/<link[^>]*href="([^"]+)"/i)?.[1] || tagValue(block, ["link"]);
-    const sourceLink = canonicalUrl(linkTag || sourceUrl);
+    const sourceLink = canonicalUrl(linkTag || sourceUrl, sourceUrl);
     const start = normalizeDate(tagValue(block, ["pubDate", "updated", "dc:date", "published", "startDate", "dtstart"]));
     const locationName = tagValue(block, ["location", "venue", "address"]);
     const tagsRaw = tagValue(block, ["category", "tags"]);
@@ -223,7 +475,7 @@ function parseIcs(text, sourceName, sourceUrl) {
     const descriptionRaw = pick("DESCRIPTION");
     const locationName = pick("LOCATION");
     const organizer = pick("ORGANIZER").replace(/^mailto:/i, "");
-    const link = canonicalUrl(pick("URL") || sourceUrl);
+    const link = canonicalUrl(pick("URL") || sourceUrl, sourceUrl);
     const start = normalizeDate(pick("DTSTART"));
     const end = normalizeDate(pick("DTEND"));
     const combined = `${title} ${descriptionRaw} ${locationName} ${organizer}`;
@@ -298,8 +550,154 @@ function sourcesFromEnv() {
     .filter((s) => /^https?:\/\//i.test(s.url));
 }
 
-async function scrapeSources(query) {
-  const cacheKey = normalizeText(query).toLowerCase() || "all";
+async function fetchTicketmasterEvents(query, location) {
+  const apiKey = process.env.TICKETMASTER_API_KEY;
+  if (!apiKey) return [];
+
+  const params = new URLSearchParams({
+    apikey: apiKey,
+    size: "100",
+    keyword: query || "community events",
+    sort: "date,asc",
+    unit: "miles",
+    radius: String(Number(process.env.SCRAPER_RADIUS_MILES || 25)),
+  });
+  if (location?.latitude != null && location?.longitude != null) {
+    params.set("latlong", `${location.latitude},${location.longitude}`);
+  }
+
+  try {
+    const response = await fetch(`https://app.ticketmaster.com/discovery/v2/events.json?${params.toString()}`);
+    if (!response.ok) return [];
+    const data = await response.json();
+    const events = data?._embedded?.events || [];
+
+    return events.map((event, idx) => {
+      const venue = event?._embedded?.venues?.[0];
+      const dateStart = event?.dates?.start?.dateTime || normalizeDate(event?.dates?.start?.localDate);
+      const venueAddress = normalizeText(
+        `${venue?.address?.line1 || ""} ${venue?.city?.name || ""} ${venue?.state?.stateCode || ""}`
+      ) || "Not listed";
+      const text = `${event?.name || ""} ${event?.info || ""} ${event?.pleaseNote || ""} ${venue?.name || ""}`;
+      return {
+        id: canonicalUrl(event?.url || `ticketmaster-${idx}`),
+        title: event?.name || "Ticketmaster Event",
+        type: inferType(text),
+        audience: inferAudience(text),
+        date_start: dateStart || null,
+        date_end: null,
+        date_unknown: !dateStart,
+        location_name: venue?.name || "Not listed",
+        address: venueAddress,
+        lat: venue?.location?.latitude ? Number(venue.location.latitude) : null,
+        lon: venue?.location?.longitude ? Number(venue.location.longitude) : null,
+        distance_miles: null,
+        organizer: event?.promoter?.name || "Not listed",
+        description: normalizeText(event?.info || event?.pleaseNote || "Not listed"),
+        accessibility_notes: normalizeText(event?.accessibility?.info || "Not listed"),
+        source_name: "Ticketmaster API",
+        source_url: canonicalUrl(event?.url || ""),
+        confidence: {
+          overall: "high",
+          date: dateStart ? "Provided by Ticketmaster event data" : "Date missing in provider payload",
+          location: venue?.name ? "Provided by Ticketmaster venue data" : "Venue details missing",
+          type: "Rule-based keyword classification from API fields"
+        },
+        needs_review: false,
+        tags_raw: normalizeText(event?.classifications?.map((c) => `${c?.segment?.name || ""} ${c?.genre?.name || ""}`).join(" ") || ""),
+        description_raw: normalizeText(event?.info || event?.pleaseNote || ""),
+        fieldOfStudy: "",
+        academicLevel: "any",
+        careerFocus: "any",
+        industry: "",
+        seniorityLevel: "",
+        networkingVsTraining: ""
+      };
+    });
+  } catch {
+    return [];
+  }
+}
+
+async function fetchEventbriteEvents(query, location) {
+  const token = process.env.EVENTBRITE_API_TOKEN;
+  if (!token) return [];
+
+  const params = new URLSearchParams({
+    q: query || "community events",
+    "location.within": `${Number(process.env.SCRAPER_RADIUS_MILES || 25)}mi`,
+    expand: "venue,organizer",
+    page_size: "50",
+    sort_by: "date",
+  });
+  if (location?.latitude != null && location?.longitude != null) {
+    params.set("location.latitude", String(location.latitude));
+    params.set("location.longitude", String(location.longitude));
+  }
+
+  try {
+    const response = await fetch(`https://www.eventbriteapi.com/v3/events/search/?${params.toString()}`, {
+      headers: {
+        Authorization: `Bearer ${token}`,
+      },
+    });
+    if (!response.ok) return [];
+    const data = await response.json();
+    const events = data?.events || [];
+
+    return events.map((event, idx) => {
+      const venue = event?.venue || {};
+      const addressObj = venue?.address || {};
+      const address = normalizeText(
+        `${addressObj?.address_1 || ""} ${addressObj?.city || ""} ${addressObj?.region || ""}`
+      ) || "Not listed";
+      const text = `${event?.name?.text || ""} ${event?.description?.text || ""} ${event?.category_id || ""}`;
+      return {
+        id: canonicalUrl(event?.url || `eventbrite-${idx}`),
+        title: event?.name?.text || "Eventbrite Event",
+        type: inferType(text),
+        audience: inferAudience(text),
+        date_start: normalizeDate(event?.start?.utc || event?.start?.local),
+        date_end: normalizeDate(event?.end?.utc || event?.end?.local),
+        date_unknown: !(event?.start?.utc || event?.start?.local),
+        location_name: venue?.name || "Not listed",
+        address,
+        lat: addressObj?.latitude ? Number(addressObj.latitude) : null,
+        lon: addressObj?.longitude ? Number(addressObj.longitude) : null,
+        distance_miles: null,
+        organizer: event?.organizer?.name || "Not listed",
+        description: normalizeText(event?.summary || event?.description?.text || "Not listed"),
+        accessibility_notes: "Not listed",
+        source_name: "Eventbrite API",
+        source_url: canonicalUrl(event?.url || ""),
+        confidence: {
+          overall: "high",
+          date: "Provided by Eventbrite event data",
+          location: venue?.name ? "Provided by Eventbrite venue data" : "Venue details missing",
+          type: "Rule-based keyword classification from API fields"
+        },
+        needs_review: false,
+        tags_raw: "",
+        description_raw: normalizeText(event?.description?.text || ""),
+        fieldOfStudy: "",
+        academicLevel: "any",
+        careerFocus: "any",
+        industry: "",
+        seniorityLevel: "",
+        networkingVsTraining: ""
+      };
+    });
+  } catch {
+    return [];
+  }
+}
+
+async function scrapeSources(query, location) {
+  const sourceSignature = `${process.env.SCRAPER_SOURCES || ""}|tm:${process.env.TICKETMASTER_API_KEY ? "1" : "0"}|eb:${process.env.EVENTBRITE_API_TOKEN ? "1" : "0"}`;
+  const locKey = location?.latitude != null && location?.longitude != null
+    ? `${Number(location.latitude).toFixed(2)},${Number(location.longitude).toFixed(2)}`
+    : "noloc";
+  const cacheKey = `${normalizeText(query).toLowerCase() || "all"}|${locKey}|${sourceSignature}`;
   const cached = scraperCache.get(cacheKey);
   if (cached && cached.expiresAt > Date.now()) {
     return cached.payload;
@@ -326,7 +724,7 @@ async function scrapeSources(query) {
       try {
         const response = await fetch(source.url, {
           signal: controller.signal,
-          headers: { "User-Agent": "CommunitreeScraper/1.0 (+respectful-rate-limit)" },
+          headers: { "User-Agent": "GratitudeScraper/1.0 (+respectful-rate-limit)" },
         });
         if (!response.ok) return [];
         const body = await response.text();
@@ -349,7 +747,16 @@ async function scrapeSources(query) {
     .filter((r) => r.status === "fulfilled")
     .flatMap((r) => r.value || []);
 
-  const deduped = dedupeItems(flattened);
+  const [ticketmasterEvents, eventbriteEvents] = await Promise.all([
+    fetchTicketmasterEvents(query, location),
+    fetchEventbriteEvents(query, location),
+  ]);
+
+  const deduped = dedupeItems([
+    ...flattened,
+    ...ticketmasterEvents,
+    ...eventbriteEvents,
+  ]);
   const organizations = deduped
     .filter((item) => ["legal_aid", "clinic", "shelter", "resource_center", "foodbank", "donation"].includes(item.type))
     .slice(0, 50)
@@ -369,7 +776,8 @@ async function scrapeSources(query) {
     results: deduped,
     organizations,
     notes: [
-      `Deterministic scraper fallback used (${sources.length} configured sources, ${deduped.length} deduplicated listings).`,
+      `Deterministic scraper fallback used (${sources.length} configured feeds, ${deduped.length} deduplicated listings).`,
+      `API sources used: Ticketmaster ${ticketmasterEvents.length > 0 ? "enabled" : "not configured/empty"}, Eventbrite ${eventbriteEvents.length > 0 ? "enabled" : "not configured/empty"}.`,
       "Classification is rule-based; review items marked needs_review."
     ],
     sourceCount: sources.length,
@@ -386,7 +794,7 @@ async function startServer() {
   const app = express();
   const PORT = Number(process.env.PORT || 3000);
 
-  app.use(express.json());
+  app.use(express.json({ limit: "25mb" }));
   app.get("/api/health", (_req, res) => {
     res.json({ status: "ok" });
   });
@@ -494,9 +902,195 @@ async function startServer() {
     res.json({ status: "ok" });
   });
 
+  app.post("/api/connections/search", (req, res) => {
+    const {
+      current_user_id = CURRENT_USER_ID,
+      location,
+      filters = {},
+      page = 1,
+      page_size = 10,
+    } = req.body || {};
+
+    if (!location?.latitude || !location?.longitude) {
+      return res.json({
+        connections: [],
+        total: 0,
+        page,
+        page_size,
+        notes: ["Location unavailable. Please share city/ZIP or enable location to discover nearby users."],
+      });
+    }
+
+    const currentUser = simulatedProfiles.find((p) => p.user_id === current_user_id) || simulatedProfiles[0];
+    const radius = Number(filters.radius_miles || 25);
+    const audience = (filters.audience_type || "all").toLowerCase();
+    const field = normalizeText(filters.field_of_study || "").toLowerCase();
+    const industry = normalizeText(filters.industry || "").toLowerCase();
+    const skills = normalizeText(filters.skills || "").toLowerCase();
+    const interests = normalizeText(filters.interests || "").toLowerCase();
+    const orgMembership = normalizeText(filters.organization_membership || "").toLowerCase();
+    const availability = normalizeText(filters.availability || "").toLowerCase();
+    const eventHistory = normalizeText(filters.event_participation || "").toLowerCase();
+    const academicLevel = normalizeText(filters.academic_level || "").toLowerCase();
+    const experienceLevel = normalizeText(filters.experience_level || "").toLowerCase();
+    const sortBy = (filters.sort_by || "nearest").toLowerCase();
+
+    let results = simulatedProfiles
+      .filter((profile) => profile.user_id !== current_user_id)
+      .map((profile) => {
+        const hasCoords = profile.location?.lat != null && profile.location?.lon != null;
+        const distance = hasCoords
+          ? calculateDistanceMiles(location.latitude, location.longitude, profile.location.lat, profile.location.lon)
+          : null;
+        const sharedInterests = sharedValues(
+          [...(currentUser?.skills || []), ...(currentUser?.interests || [])],
+          [...(profile.skills || []), ...(profile.interests || [])]
+        );
+        return {
+          ...profile,
+          _distance_miles: distance,
+          _is_connection: isConnection(current_user_id, profile.user_id),
+          _shared_interests: sharedInterests,
+        };
+      })
+      .filter((profile) => !isBlocked(current_user_id, profile.user_id))
+      .filter((profile) => profile._distance_miles == null || profile._distance_miles <= radius)
+      .filter((profile) => {
+        if (profile.profile_visibility === "connections_only" && !profile._is_connection) return false;
+        if (profile.profile_visibility === "nearby_only" && (profile._distance_miles == null || profile._distance_miles > radius)) return false;
+        return true;
+      })
+      .filter((profile) => audience === "all" || profile.audience_type === audience)
+      .filter((profile) => !field || (profile.field_of_study || "").toLowerCase().includes(field))
+      .filter((profile) => !industry || (profile.industry || "").toLowerCase().includes(industry))
+      .filter((profile) => !skills || profile.skills.some((s) => s.toLowerCase().includes(skills)))
+      .filter((profile) => !interests || profile.interests.some((i) => i.toLowerCase().includes(interests)))
+      .filter((profile) => !orgMembership || profile.organization_memberships.some((m) => m.toLowerCase().includes(orgMembership)))
+      .filter((profile) => !availability || (profile.availability || "").toLowerCase().includes(availability))
+      .filter((profile) => !eventHistory || profile.event_participation_history.some((e) => e.toLowerCase().includes(eventHistory)))
+      .filter((profile) => !academicLevel || (profile.academic_level || "").toLowerCase() === academicLevel)
+      .filter((profile) => !experienceLevel || (profile.experience_level || "").toLowerCase() === experienceLevel);
+
+    results.sort((a, b) => {
+      if (sortBy === "most_active") return new Date(b.last_active).getTime() - new Date(a.last_active).getTime();
+      if (sortBy === "newest_members") return new Date(b.joined_date).getTime() - new Date(a.joined_date).getTime();
+      if (sortBy === "shared_interests") return b._shared_interests.length - a._shared_interests.length || (a._distance_miles ?? 9999) - (b._distance_miles ?? 9999);
+      return (a._distance_miles ?? 9999) - (b._distance_miles ?? 9999);
+    });
+
+    const total = results.length;
+    const safePageSize = Math.max(1, Math.min(50, Number(page_size) || 10));
+    const safePage = Math.max(1, Number(page) || 1);
+    const start = (safePage - 1) * safePageSize;
+    const paged = results.slice(start, start + safePageSize).map((profile) => {
+      let visibleDistance = profile._distance_miles;
+      if (profile.location_visibility === "hidden") visibleDistance = null;
+      if (profile.location_visibility === "approximate_area" && visibleDistance != null) {
+        visibleDistance = Math.max(1, Math.round(visibleDistance / 5) * 5);
+      }
+      return {
+        user_id: profile.user_id,
+        display_name: profile.display_name,
+        audience_type: profile.audience_type,
+        distance_miles: visibleDistance != null ? Number(visibleDistance.toFixed(1)) : null,
+        field_of_study: profile.field_of_study || "",
+        industry: profile.industry || "",
+        skills: profile.skills || [],
+        interests: profile.interests || [],
+        shared_interests: profile._shared_interests || [],
+        profile_summary: profile.bio || "No bio available.",
+        profile_color_theme: profile.profile_color_theme || "#5A5A40",
+        last_active: profile.last_active,
+      };
+    });
+
+    const notes = total === 0
+      ? ["No users matched your filters. Try increasing radius or removing one or more filters."]
+      : [];
+
+    return res.json({
+      connections: paged,
+      total,
+      page: safePage,
+      page_size: safePageSize,
+      notes,
+    });
+  });
+
+  app.get("/api/messages/:peerId", (req, res) => {
+    const currentUserId = (req.query.current_user_id || CURRENT_USER_ID).toString();
+    const peerId = req.params.peerId;
+
+    const conversation = simulatedMessages
+      .filter((m) =>
+        (m.sender_id === currentUserId && m.receiver_id === peerId) ||
+        (m.sender_id === peerId && m.receiver_id === currentUserId)
+      )
+      .sort((a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime())
+      .map((m) => {
+        if (m.sender_id === peerId && m.receiver_id === currentUserId) {
+          m.read_status = true;
+        }
+        return m;
+      });
+
+    return res.json({ messages: conversation });
+  });
+
+  app.post("/api/messages", (req, res) => {
+    const {
+      current_user_id = CURRENT_USER_ID,
+      sender_id = CURRENT_USER_ID,
+      receiver_id,
+      message_text,
+    } = req.body || {};
+
+    if (!receiver_id || !normalizeText(message_text)) {
+      return res.status(400).json({ error: "receiver_id and message_text are required" });
+    }
+    if (sender_id !== current_user_id) {
+      return res.status(400).json({ error: "sender_id must match current_user_id" });
+    }
+    if (isBlocked(sender_id, receiver_id)) {
+      return res.status(403).json({ error: "Messaging is blocked between these users" });
+    }
+
+    const sender = simulatedProfiles.find((p) => p.user_id === sender_id);
+    const receiver = simulatedProfiles.find((p) => p.user_id === receiver_id);
+    if (!sender || !receiver) {
+      return res.status(404).json({ error: "User not found" });
+    }
+
+    const senderDistance = calculateDistanceMiles(
+      sender.location.lat,
+      sender.location.lon,
+      receiver.location.lat,
+      receiver.location.lon
+    );
+    const canMessage =
+      receiver.messaging_permission === "anyone" ||
+      (receiver.messaging_permission === "nearby_users" && senderDistance <= 25) ||
+      (receiver.messaging_permission === "connections_only" && isConnection(sender_id, receiver_id));
+
+    if (!canMessage) {
+      return res.status(403).json({ error: "Receiver privacy settings do not allow this message" });
+    }
+
+    const message = {
+      message_id: randomUUID(),
+      sender_id,
+      receiver_id,
+      timestamp: new Date().toISOString(),
+      message_text: normalizeText(message_text),
+      read_status: false,
+    };
+    simulatedMessages.push(message);
+    return res.json({ message });
+  });
+
   app.post("/api/scrape-fallback", async (req, res) => {
     const { query, location } = req.body || {};
-    const scraped = await scrapeSources(query || "");
+    const scraped = await scrapeSources(query || "", location);
     res.json({
       query_context: {
         user_location: {
@@ -657,6 +1251,16 @@ async function startServer() {
       res.sendFile(path.join(__dirname, "dist", "index.html"));
     });
   }
+
+  app.use((err, _req, res, next) => {
+    if (err?.type === "entity.too.large") {
+      return res.status(413).json({
+        error: "Payload too large",
+        message: "Request body exceeded server limit. Reduce result size or send in smaller chunks."
+      });
+    }
+    return next(err);
+  });
 
   app.listen(PORT, "0.0.0.0", () => {
     console.log(`Server running on http://localhost:${PORT}`);
