@@ -43,6 +43,9 @@ Set these in `.env`:
 - `SCRAPER_RADIUS_MILES` (optional, default `25`)
 - `TICKETMASTER_API_KEY` (optional API source)
 - `EVENTBRITE_API_TOKEN` (optional API source)
+- `YOUTUBE_API_KEY` (optional, enables in-app YouTube search + embed links)
+- `BACKBOARD_API_KEY` (optional AI/data failover)
+- `BACKBOARD_API_URL` (optional, default `https://api.backboard.io`)
 - `PORT` (optional, default `3000`)
 
 Example:
@@ -52,14 +55,18 @@ SCRAPER_TIMEOUT_MS=10000
 SCRAPER_RADIUS_MILES=25
 TICKETMASTER_API_KEY=your_ticketmaster_key
 EVENTBRITE_API_TOKEN=your_eventbrite_token
+YOUTUBE_API_KEY=your_youtube_data_api_v3_key
+BACKBOARD_API_KEY=your_backboard_key
+BACKBOARD_API_URL=https://api.backboard.io
 ```
 
 ## Data Pipeline and Fallback Order
 
 Request flow:
 1. Gemini
-2. OpenAI failover
-3. Deterministic scraper fallback (`/api/scrape-fallback`)
+2. Backboard failover
+3. OpenAI failover
+4. Deterministic scraper fallback (`/api/scrape-fallback`)
 
 Scraper fallback behavior:
 - Parses RSS/Atom/ICS feeds.
@@ -71,9 +78,12 @@ Scraper fallback behavior:
 ## Local Caching and Saved Data
 
 - Search results are cached in browser `localStorage` (`gratitude_tab_cache_v1`) by tab.
+- Video queries are cached in browser `localStorage` (`gratitude_video_cache_v1`) by query + filters.
+- Local artist queries are cached in browser `localStorage` (`gratitude_artist_cache_v1`) by query + radius + location.
 - Saved items are stored in browser `localStorage` (`communitree_list`).
 - Server cache is stored in SQLite (`community.db`) via `/api/items`.
 - Duplicate entries are removed before client render and before server cache insert.
+- When a section returns no results, the app automatically runs AI/web failover (Backboard/Gemini path), then stores those results for reuse on next visit.
 
 ## Run Modes
 
@@ -136,6 +146,7 @@ No scraper results:
 3. Add map marker clustering and lazy marker rendering for large result sets.
 4. Add WebSocket-based real-time updates for the Connections messaging panel.
 5. Add automated feed health checks (last successful scrape, parse failure rate).
+6. Expand public API ingestion (YouTube, OpenStreetMap/Overpass, city open data) with per-source monitoring.
 
 ## Scripts
 

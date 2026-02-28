@@ -25,6 +25,51 @@ export function calculateDistance(lat1: number, lon1: number, lat2: number, lon2
   return R * c;
 }
 
+function normalizeDateString(value: any): string | null {
+  if (!value) return null;
+  const d = new Date(value);
+  if (Number.isNaN(d.getTime())) return null;
+  return d.toISOString();
+}
+
+function normalizeText(value: any): string {
+  return String(value || "").replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim();
+}
+
+function normalizeItems(rows: any[]) {
+  return (rows || []).map((item: any) => {
+    const dateStart = normalizeDateString(item.date_start || item.start_date || item.start);
+    const dateEnd = normalizeDateString(item.date_end || item.end_date || item.end);
+    return {
+      ...item,
+      title: item.title || item.name || "Untitled",
+      description: normalizeText(item.description || item.summary || "Not listed"),
+      date_start: dateStart,
+      date_end: dateEnd,
+      date_unknown: !dateStart && !dateEnd,
+      address: normalizeText(item.address || "Not listed"),
+      location_name: normalizeText(item.location_name || item.venue || item.place || "Not listed"),
+      source_url: item.source_url || item.url || "",
+      retrieved_at: item.retrieved_at || new Date().toISOString(),
+    };
+  });
+}
+
+function dedupeBySourceAndSignature(items: any[]) {
+  const seen = new Set<string>();
+  const out: any[] = [];
+  for (const item of items || []) {
+    const day = item.date_start ? String(item.date_start).slice(0, 10) : "unknown";
+    const key = item.source_url
+      ? `url:${item.source_url}`
+      : `${String(item.title || "").toLowerCase()}|${String(item.location_name || item.address || "").toLowerCase()}|${day}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(item);
+  }
+  return out;
+}
+
 export async function fetchCommunityData(query: string, location?: Location, retries = 3, delay = 2000) {
   const model = "gemini-2.5-flash";
   const fallbackNotes = [
@@ -80,9 +125,10 @@ Return ONLY valid JSON with this exact top-level shape:
 {
   "ui_layout": {
     "layout_type": "two_column_nextdoor_style_v3",
-    "left_tabs": ["events","volunteer","food_assistance","organizations","clinics_legal","connections","saved","map_all","settings"],
+    "left_tabs": ["events","volunteer","food_assistance","organizations","help_support","connections","saved","map_all","settings"],
+    "help_support_sections": ["clinics","legal_aid","shelters","translators","newcomer_guides"],
     "right_view_mode": "list|map|split",
-    "active_tab": "events|volunteer|food_assistance|organizations|clinics_legal|connections|saved|map_all|settings"
+    "active_tab": "events|volunteer|food_assistance|organizations|help_support|connections|saved|map_all|settings"
   },
   "query_context": {
     "user_timezone": "America/New_York",
@@ -204,11 +250,37 @@ Query: ${query}`;
       summary = fallbackNotes[0];
     }
 
+    let mergedItems = normalizeItems(items);
+    const mergedOrganizations = organizations || [];
+    const mergedNotes = [...(notes || [])];
+    const sources = new Set<string>(["gemini"]);
+
+    // Backboard combination layer (best-effort).
+    try {
+      const backboardResponse = await fetch("/api/backboard/search", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ query, location }),
+      });
+      if (backboardResponse.ok) {
+        const backboard = await backboardResponse.json();
+        mergedItems = dedupeBySourceAndSignature([...mergedItems, ...normalizeItems(backboard.items || [])]);
+        if (Array.isArray(backboard.notes)) mergedNotes.push(...backboard.notes);
+        (backboard.api_sources || []).forEach((s: string) => sources.add(s));
+      }
+    } catch {
+      // Ignore backboard failures; keep Gemini output.
+    }
+
     return {
-      items,
+      items: mergedItems,
       organizations,
       summary,
-      notes,
+      notes: mergedNotes,
+      videos: [],
+      artists: [],
+      api_sources: Array.from(sources),
+      ai_assistant_enabled: true,
       groundingChunks: response.candidates?.[0]?.groundingMetadata?.groundingChunks || [],
     };
   } catch (error: any) {
@@ -221,6 +293,35 @@ Query: ${query}`;
       }
     }
     
+    // Backboard failover (before other fallbacks)
+    console.warn("Gemini failed, trying Backboard failover...");
+    try {
+      const backboardResponse = await fetch("/api/backboard/search", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ query, location })
+      });
+      if (backboardResponse.ok) {
+        const data = await backboardResponse.json();
+        const normalized = normalizeItems(data.items || []);
+        if (normalized.length > 0) {
+          return {
+            items: dedupeBySourceAndSignature(normalized),
+            organizations: data.organizations || [],
+            summary: data.notes?.join(" ") || "Results from Backboard failover.",
+            notes: data.notes || [],
+            videos: data.videos || [],
+            artists: data.artists || [],
+            api_sources: data.api_sources || ["backboard"],
+            ai_assistant_enabled: true,
+            groundingChunks: []
+          };
+        }
+      }
+    } catch (backboardError) {
+      console.error("Backboard failover failed:", backboardError);
+    }
+
     // Failover to OpenAI via backend
     console.warn("Gemini failed, trying OpenAI failover...");
     try {
@@ -237,6 +338,10 @@ Query: ${query}`;
           organizations: data.organizations || [],
           summary: data.notes?.join(" ") || "Results from failover service.",
           notes: data.notes || [],
+          videos: data.videos || [],
+          artists: data.artists || [],
+          api_sources: data.api_sources || ["openai", "scraper"],
+          ai_assistant_enabled: data.ai_assistant_enabled ?? true,
           groundingChunks: []
         };
       }
@@ -260,6 +365,10 @@ Query: ${query}`;
           organizations: data.organizations || [],
           summary: data.notes?.join(" ") || "Deterministic scraper fallback results.",
           notes: data.notes || [],
+          videos: data.videos || [],
+          artists: data.artists || [],
+          api_sources: data.api_sources || ["scraper", "openstreetmap", "nominatim"],
+          ai_assistant_enabled: data.ai_assistant_enabled ?? true,
           groundingChunks: []
         };
       }

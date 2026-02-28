@@ -24,7 +24,8 @@ import {
   Building2,
   Settings,
   MessageCircle,
-  Search
+  Search,
+  Bot
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import ReactMarkdown from 'react-markdown';
@@ -33,11 +34,17 @@ import { twMerge } from 'tailwind-merge';
 import { MapContainer, TileLayer, Marker, Popup, useMap } from 'react-leaflet';
 import L from 'leaflet';
 import { fetchCommunityData, Location, calculateDistance } from './services/geminiService';
-import { CommunityItem, ConnectionProfile, DirectMessage } from './types';
+import { CommunityItem, ConnectionProfile, DirectMessage, CommunityVideo, LocalArtist, TranslatorEntity, NewcomerGuide } from './types';
 
 // Fix Leaflet icon issue
 const DefaultIcon = L.icon({
     iconUrl: 'https://unpkg.com/leaflet@1.9.4/dist/images/marker-icon.png',
+    shadowUrl: 'https://unpkg.com/leaflet@1.9.4/dist/images/marker-shadow.png',
+    iconSize: [25, 41],
+    iconAnchor: [12, 41]
+});
+const UserLocationIcon = L.icon({
+    iconUrl: 'https://raw.githubusercontent.com/pointhi/leaflet-color-markers/master/img/marker-icon-red.png',
     shadowUrl: 'https://unpkg.com/leaflet@1.9.4/dist/images/marker-shadow.png',
     iconSize: [25, 41],
     iconAnchor: [12, 41]
@@ -77,11 +84,15 @@ type AccentPreset = 'failover' | 'carolina_blue' | 'custom';
 type AudienceFilter = 'all' | 'student' | 'professional' | 'general' | 'families' | 'seniors';
 type SortBy = 'distance' | 'soonest' | 'newest' | 'relevance';
 type EventWindow = 'upcoming_only' | 'today' | 'this_week' | 'this_month' | 'custom';
+type MapScope = 'radius' | 'viewport';
+type HelpSupportSection = 'clinics' | 'legal_aid' | 'shelters' | 'translators' | 'newcomer_guides';
 
 const FAILOVER_ACCENT = '#5A5A40';
 const CAROLINA_BLUE_ACCENT = '#4B9CD3';
 const CURRENT_USER_ID = 'user_me';
 const LOCAL_CACHE_KEY = 'gratitude_tab_cache_v1';
+const VIDEO_CACHE_KEY = 'gratitude_video_cache_v1';
+const ARTIST_CACHE_KEY = 'gratitude_artist_cache_v1';
 
 function toCanonicalUrl(url?: string) {
   if (!url) return '';
@@ -118,7 +129,8 @@ function readLocalTabCache(tab: string): { items: CommunityItem[]; summary: stri
     if (!entry) return null;
     if (!Array.isArray(entry.items)) return null;
     const ageMs = Date.now() - Number(entry.updatedAt || 0);
-    if (ageMs > 1000 * 60 * 60 * 12) return null;
+    const maxAgeMs = tab === 'events' ? 1000 * 60 * 60 * 6 : 1000 * 60 * 60 * 24 * 30;
+    if (ageMs > maxAgeMs) return null;
     return { items: entry.items, summary: entry.summary || '' };
   } catch {
     return null;
@@ -143,6 +155,34 @@ function writeLocalTabCache(tab: string, items: CommunityItem[], summary: string
   safeSetLocalStorage(LOCAL_CACHE_KEY, JSON.stringify(parsed));
 }
 
+function readSignatureCache(cacheKey: string, signature: string, maxAgeMs = 1000 * 60 * 60 * 24 * 30) {
+  const raw = safeGetLocalStorage(cacheKey);
+  if (!raw) return null;
+  try {
+    const parsed = JSON.parse(raw);
+    const entry = parsed?.[signature];
+    if (!entry) return null;
+    if ((Date.now() - Number(entry.updatedAt || 0)) > maxAgeMs) return null;
+    return entry.data ?? null;
+  } catch {
+    return null;
+  }
+}
+
+function writeSignatureCache(cacheKey: string, signature: string, data: any) {
+  const raw = safeGetLocalStorage(cacheKey);
+  let parsed: Record<string, any> = {};
+  if (raw) {
+    try {
+      parsed = JSON.parse(raw);
+    } catch {
+      parsed = {};
+    }
+  }
+  parsed[signature] = { data, updatedAt: Date.now() };
+  safeSetLocalStorage(cacheKey, JSON.stringify(parsed));
+}
+
 function normalizeSummary(value: string) {
   if (!value) return '';
   if (value.includes('Deterministic scraper fallback used')) {
@@ -158,6 +198,24 @@ function parseDateSafe(value?: string | null) {
   return d;
 }
 
+function isValidCoordinate(lat?: number | null, lon?: number | null) {
+  if (lat == null || lon == null) return false;
+  if (!Number.isFinite(lat) || !Number.isFinite(lon)) return false;
+  if (lat === 0 && lon === 0) return false;
+  return lat >= -90 && lat <= 90 && lon >= -180 && lon <= 180;
+}
+
+function normalizeCoordinates(lat?: number | null, lon?: number | null): { lat: number; lon: number } | null {
+  if (isValidCoordinate(lat, lon)) return { lat: Number(lat), lon: Number(lon) };
+  // Basic swapped coordinate correction.
+  if (lat != null && lon != null && Number.isFinite(lat) && Number.isFinite(lon)) {
+    const maybeLat = Number(lon);
+    const maybeLon = Number(lat);
+    if (isValidCoordinate(maybeLat, maybeLon)) return { lat: maybeLat, lon: maybeLon };
+  }
+  return null;
+}
+
 function formatEventDate(start?: string, dateUnknown?: boolean) {
   const parsed = parseDateSafe(start);
   if (!parsed) return dateUnknown ? 'Date not listed' : 'Date not listed';
@@ -169,9 +227,210 @@ function formatEventDate(start?: string, dateUnknown?: boolean) {
 }
 
 function getGeocodeQuery(item: CommunityItem) {
-  const pieces = [item.address, item.location_name].filter(Boolean).map((v) => String(v).trim());
+  const clean = (value: unknown) =>
+    String(value || '')
+      .replace(/<[^>]*>/g, ' ')
+      .replace(/&nbsp;|&amp;|&lt;|&gt;|&quot;|&#39;/g, ' ')
+      .replace(/\s+/g, ' ')
+      .trim();
+  const pieces = [item.address, item.location_name].filter(Boolean).map((v) => clean(v));
   const query = pieces.find((v) => v && !/^not listed$/i.test(v));
   return query || '';
+}
+
+function textSignals(item: CommunityItem) {
+  return `${item.title || item.name || ''} ${item.description || ''} ${item.type || ''} ${item.category || ''} ${item.location_name || ''} ${item.address || ''}`.toLowerCase();
+}
+
+function isFoodItem(item: CommunityItem) {
+  const t = textSignals(item);
+  return (
+    ['foodbank', 'donation'].includes((item.type || '').toLowerCase()) ||
+    (item.category || '').toLowerCase() === 'food_assistance' ||
+    /(food bank|food pantry|pantry|meal|soup kitchen|donation|donate|food assistance|grocery support)/.test(t)
+  );
+}
+
+function isClinicLegalItem(item: CommunityItem) {
+  const t = textSignals(item);
+  if (/(medical school|school of medicine|application|admission|admissions|student application|enrollment)/.test(t)) {
+    return false;
+  }
+  return (
+    ['clinic', 'legal_aid', 'shelter', 'resource_center'].includes((item.type || '').toLowerCase()) ||
+    ['free_clinic', 'legal_aid', 'lawyer', 'shelter'].includes((item.category || '').toLowerCase()) ||
+    /(free clinic|health clinic|community clinic|urgent care|medical aid|health aid|legal aid|legal clinic|pro bono|attorney|lawyer|shelter|domestic violence|crisis support|immigration legal)/.test(t)
+  );
+}
+
+function isEventLikeType(type?: string) {
+  return ['event', 'workshop', 'class', 'networking', 'support_group'].includes((type || '').toLowerCase());
+}
+
+function prunePastEvents(items: CommunityItem[]) {
+  const now = new Date();
+  return items.filter((item) => {
+    if (!isEventLikeType(item.type)) return true;
+    const start = parseDateSafe(item.date_start);
+    const end = parseDateSafe(item.date_end);
+    if (!start && !end) return true;
+    const reference = end || start;
+    return reference ? reference >= now : true;
+  });
+}
+
+function t(lang: string, key: string) {
+  const l = (lang || "English").toLowerCase();
+  const dict: Record<string, Record<string, string>> = {
+    english: {
+      events: "Events",
+      volunteer: "Volunteer Opportunities",
+      food: "Food Banks & Donations",
+      organizations: "Organizations",
+      clinics: "Help & Support",
+      connections: "Connections",
+      saved: "Saved Items",
+      map: "Map (All Categories)",
+      settings: "Settings",
+      reset: "Reset Filters",
+      search: "Search resources...",
+      details: "Details",
+      refresh: "Refresh",
+      all: "All",
+      student: "Student",
+      professional: "Professional",
+      families: "Families",
+      sort_soonest: "Sort by Soonest",
+      sort_distance: "Sort by Distance",
+      sort_relevance: "Sort by Relevance",
+      sort_newest: "Sort by Recently Added",
+      map_scope_radius: "Map scope: Radius",
+      map_scope_viewport: "Map scope: Viewport",
+      upcoming_only: "Upcoming only",
+      today: "Today",
+      this_week: "This week",
+      this_month: "This month",
+      custom_range: "Custom range",
+      all_types: "All types",
+      include_undated: "Include undated",
+      include_past: "Include past events",
+      language_placeholder: "Language (e.g., Farsi, Pashto)",
+      cultural_placeholder: "Cultural group (e.g., Iranian, Kurdish)",
+      translation_services: "Translation services",
+      immigration_support: "Immigration support",
+      newcomer_support: "Newcomer support",
+      no_exact_match: "No exact match found. Showing closest cultural or language matches.",
+      ai_fallback_running: "No exact match yet. Running AI web search fallback automatically...",
+      community_videos: "Community Videos",
+      local_artists: "Local Artists",
+      loading_videos: "Loading videos...",
+      loading_artists: "Loading artists...",
+      no_videos: "Search to discover community and educational videos.",
+      no_artists: "No artists found in current radius.",
+      all_channels: "All Channels",
+      any_length: "Any Length",
+      no_items: "No items found matching your filters.",
+      distance_unavailable: "Distance unavailable",
+      miles_away: "miles away",
+    },
+    spanish: {
+      events: "Eventos",
+      volunteer: "Voluntariado",
+      food: "Bancos de Comida y Donaciones",
+      organizations: "Organizaciones",
+      clinics: "Ayuda y Apoyo",
+      connections: "Conexiones",
+      saved: "Guardados",
+      map: "Mapa (Todas las categorías)",
+      settings: "Configuración",
+      reset: "Restablecer filtros",
+      search: "Buscar recursos...",
+      details: "Detalles",
+      refresh: "Actualizar",
+    },
+    farsi: {
+      events: "رویدادها",
+      volunteer: "داوطلبی",
+      food: "بانک غذا و کمک‌ها",
+      organizations: "سازمان‌ها",
+      clinics: "کمک و پشتیبانی",
+      connections: "ارتباطات",
+      saved: "موارد ذخیره‌شده",
+      map: "نقشه (همه دسته‌ها)",
+      settings: "تنظیمات",
+      reset: "بازنشانی فیلترها",
+      search: "جستجوی منابع...",
+      details: "جزئیات",
+      refresh: "تازه‌سازی",
+    },
+    arabic: {
+      events: "الفعاليات",
+      volunteer: "التطوع",
+      food: "بنوك الطعام والتبرعات",
+      organizations: "المنظمات",
+      clinics: "المساعدة والدعم",
+      connections: "الاتصالات",
+      saved: "العناصر المحفوظة",
+      map: "الخريطة (كل الفئات)",
+      settings: "الإعدادات",
+      reset: "إعادة تعيين الفلاتر",
+      search: "ابحث في الموارد...",
+      details: "التفاصيل",
+      refresh: "تحديث",
+    },
+    french: {
+      events: "Événements",
+      volunteer: "Bénévolat",
+      food: "Banques alimentaires et dons",
+      organizations: "Organisations",
+      clinics: "Aide et soutien",
+      connections: "Connexions",
+      saved: "Éléments enregistrés",
+      map: "Carte (toutes catégories)",
+      settings: "Paramètres",
+      reset: "Réinitialiser les filtres",
+      search: "Rechercher des ressources...",
+      details: "Détails",
+      refresh: "Actualiser",
+      all: "Tous",
+      student: "Étudiant",
+      professional: "Professionnel",
+      families: "Familles",
+      sort_soonest: "Trier par date proche",
+      sort_distance: "Trier par distance",
+      sort_relevance: "Trier par pertinence",
+      sort_newest: "Trier par ajout récent",
+      map_scope_radius: "Portée carte : rayon",
+      map_scope_viewport: "Portée carte : écran",
+      upcoming_only: "À venir uniquement",
+      today: "Aujourd'hui",
+      this_week: "Cette semaine",
+      this_month: "Ce mois-ci",
+      custom_range: "Plage personnalisée",
+      all_types: "Tous les types",
+      include_undated: "Inclure sans date",
+      include_past: "Inclure les événements passés",
+      language_placeholder: "Langue (ex: persan, pachto)",
+      cultural_placeholder: "Groupe culturel (ex: iranien, kurde)",
+      translation_services: "Services de traduction",
+      immigration_support: "Aide à l'immigration",
+      newcomer_support: "Aide aux nouveaux arrivants",
+      no_exact_match: "Aucune correspondance exacte. Affichage des résultats les plus proches.",
+      ai_fallback_running: "Aucun résultat exact. Recherche web IA en cours...",
+      community_videos: "Vidéos communautaires",
+      local_artists: "Artistes locaux",
+      no_items: "Aucun résultat correspondant aux filtres.",
+      loading_videos: "Chargement des vidéos...",
+      loading_artists: "Chargement des artistes...",
+      no_artists: "Aucun artiste trouvé dans le rayon actuel.",
+      no_videos: "Recherchez pour découvrir des vidéos communautaires et éducatives.",
+      all_channels: "Toutes les chaînes",
+      any_length: "Toute durée",
+      distance_unavailable: "Distance indisponible",
+      miles_away: "miles",
+    },
+  };
+  return dict[l]?.[key] || dict.english[key] || key;
 }
 
 export default function App() {
@@ -198,6 +457,8 @@ export default function App() {
   const [eventTypeFilter, setEventTypeFilter] = useState<string>('all');
   const [customDateStart, setCustomDateStart] = useState<string>('');
   const [customDateEnd, setCustomDateEnd] = useState<string>('');
+  const [mapScope, setMapScope] = useState<MapScope>('radius');
+  const [viewportBounds, setViewportBounds] = useState<{ north: number; south: number; east: number; west: number } | null>(null);
   
   // Student Filters
   const [fieldOfStudy, setFieldOfStudy] = useState<string>("all");
@@ -211,6 +472,27 @@ export default function App() {
 
   // Org Filters
   const [orgCategoryFilter, setOrgCategoryFilter] = useState<string>("all");
+  const [orgCulturalGroupFilter, setOrgCulturalGroupFilter] = useState<string>("");
+  const [orgLanguageFilter, setOrgLanguageFilter] = useState<string>("");
+  const [orgTranslationOnly, setOrgTranslationOnly] = useState(false);
+  const [orgImmigrantSupportOnly, setOrgImmigrantSupportOnly] = useState(false);
+  const [orgNewcomerSupportOnly, setOrgNewcomerSupportOnly] = useState(false);
+  const [foodTypeFilter, setFoodTypeFilter] = useState<'all' | 'foodbank' | 'donation'>('all');
+  const [clinicServiceFilter, setClinicServiceFilter] = useState<'all' | 'clinic' | 'legal_aid' | 'shelter' | 'resource_center' | 'lawyer'>('all');
+  const [helpSupportSection, setHelpSupportSection] = useState<HelpSupportSection>('clinics');
+  const [translatorItems, setTranslatorItems] = useState<TranslatorEntity[]>([]);
+  const [newcomerGuideItems, setNewcomerGuideItems] = useState<NewcomerGuide[]>([]);
+  const [helpSupportLoading, setHelpSupportLoading] = useState(false);
+  const [translatorLanguageNeeded, setTranslatorLanguageNeeded] = useState('');
+  const [translatorServiceType, setTranslatorServiceType] = useState<'translator' | 'interpreter' | 'both'>('both');
+  const [translatorMode, setTranslatorMode] = useState<'in_person' | 'remote' | 'phone' | 'any'>('any');
+  const [translatorSpecialization, setTranslatorSpecialization] = useState<'medical' | 'legal' | 'education' | 'general'>('general');
+  const [translatorCost, setTranslatorCost] = useState<'free' | 'paid' | 'any'>('any');
+  const [translatorAvailability, setTranslatorAvailability] = useState<'same_day' | 'weekends' | 'any'>('any');
+  const [newcomerLanguage, setNewcomerLanguage] = useState('');
+  const [newcomerTopic, setNewcomerTopic] = useState<'all' | 'documentation' | 'healthcare' | 'housing' | 'education' | 'employment' | 'banking' | 'transportation' | 'legal_rights_general' | 'emergency_services'>('all');
+  const [newcomerFormat, setNewcomerFormat] = useState<'any' | 'article' | 'pdf' | 'video' | 'checklist' | 'local_program'>('any');
+  const [interfaceLanguage, setInterfaceLanguage] = useState<string>(() => safeGetLocalStorage('gratitude_interface_language') || 'English');
 
   const [viewMode, setViewMode] = useState<'grid' | 'map' | 'split'>('grid');
   const [showSettings, setShowSettings] = useState(false);
@@ -251,6 +533,37 @@ export default function App() {
   const [messages, setMessages] = useState<DirectMessage[]>([]);
   const [messagesLoading, setMessagesLoading] = useState(false);
   const [messageDraft, setMessageDraft] = useState('');
+  const [videos, setVideos] = useState<CommunityVideo[]>([]);
+  const [videosLoading, setVideosLoading] = useState(false);
+  const [videoOrder, setVideoOrder] = useState<'relevance' | 'date'>('relevance');
+  const [videoDuration, setVideoDuration] = useState<'any' | 'short' | 'medium' | 'long'>('any');
+  const [videoChannelType, setVideoChannelType] = useState<'all' | 'organization' | 'educational' | 'individual'>('all');
+  const [artists, setArtists] = useState<LocalArtist[]>([]);
+  const [artistsLoading, setArtistsLoading] = useState(false);
+  const [assistantOpen, setAssistantOpen] = useState(false);
+  const [assistantMessages, setAssistantMessages] = useState<Array<{ role: 'user' | 'assistant'; text: string; suggestions?: any[] }>>([]);
+  const [assistantDraft, setAssistantDraft] = useState('');
+  const [autoRescueSignature, setAutoRescueSignature] = useState<string>('');
+  const [autoRescueLoading, setAutoRescueLoading] = useState(false);
+  const [communityPosts] = useState<Array<{ id: string; title: string; body: string; category: 'General' | 'Help Needed' | 'Local News' | 'Events' | 'Free Items'; neighborhood?: string }>>([
+    { id: 'p1', title: 'Need moving boxes', body: 'Looking for free boxes this weekend near downtown.', category: 'Help Needed', neighborhood: 'Downtown Chapel Hill' },
+    { id: 'p2', title: 'Saturday clean-up', body: 'Volunteers meeting at 10 AM at the library lot.', category: 'Events', neighborhood: 'Campus Area' },
+  ]);
+  const [groups, setGroups] = useState<Array<{ group_id: string; name: string; description: string; member_count: number; location: string; joined?: boolean }>>([
+    { group_id: 'g1', name: 'Tech Students', description: 'Study jams and project collaboration.', member_count: 214, location: 'Campus Area' },
+    { group_id: 'g2', name: 'Volunteers', description: 'Coordinate service opportunities.', member_count: 389, location: 'Downtown Chapel Hill' },
+    { group_id: 'g3', name: 'Local Entrepreneurs', description: 'Networking for founders and builders.', member_count: 176, location: 'Triangle Region' },
+  ]);
+  const [attendance, setAttendance] = useState<Record<string, { interested: number; going: number }>>(() => {
+    const raw = safeGetLocalStorage('gratitude_event_attendance_v1');
+    if (!raw) return {};
+    try {
+      const parsed = JSON.parse(raw);
+      return parsed && typeof parsed === 'object' ? parsed : {};
+    } catch {
+      return {};
+    }
+  });
 
   useEffect(() => {
     if (typeof window === 'undefined' || typeof window.matchMedia !== 'function') {
@@ -280,6 +593,7 @@ export default function App() {
       largeTextMode && "large-text-mode",
       reducedMotion && "reduced-motion"
     );
+    document.documentElement.setAttribute('dir', ['arabic', 'farsi'].includes(interfaceLanguage.toLowerCase()) ? 'rtl' : 'ltr');
     document.documentElement.style.setProperty('--accent-color', appliedAccentColor);
     safeSetLocalStorage('communitree_appearance', appearance);
     safeSetLocalStorage('communitree_accent_preset', accentPreset);
@@ -288,11 +602,16 @@ export default function App() {
     safeSetLocalStorage('communitree_largetext', largeTextMode.toString());
     safeSetLocalStorage('communitree_reducedmotion', reducedMotion.toString());
     safeSetLocalStorage('communitree_screenreader_labels', screenReaderLabels.toString());
-  }, [appearance, accentPreset, accentCustomHex, resolvedAppearance, appliedAccentColor, highContrast, largeTextMode, reducedMotion, screenReaderLabels]);
+    safeSetLocalStorage('gratitude_interface_language', interfaceLanguage);
+  }, [appearance, accentPreset, accentCustomHex, resolvedAppearance, appliedAccentColor, highContrast, largeTextMode, reducedMotion, screenReaderLabels, interfaceLanguage]);
 
   useEffect(() => {
     safeSetLocalStorage('communitree_list', JSON.stringify(myList));
   }, [myList]);
+
+  useEffect(() => {
+    safeSetLocalStorage('gratitude_event_attendance_v1', JSON.stringify(attendance));
+  }, [attendance]);
 
   useEffect(() => {
     if ("geolocation" in navigator) {
@@ -397,13 +716,256 @@ export default function App() {
     }
   };
 
+  const fetchVideos = async (query: string) => {
+    const q = query.trim();
+    if (!q) {
+      setVideos([]);
+      return;
+    }
+    const signature = [
+      q.toLowerCase(),
+      videoOrder,
+      videoDuration,
+      videoChannelType,
+      interfaceLanguage.toLowerCase(),
+    ].join("|");
+    const cached = readSignatureCache(VIDEO_CACHE_KEY, signature);
+    if (Array.isArray(cached) && cached.length > 0) {
+      setVideos(cached);
+      return;
+    }
+    setVideosLoading(true);
+    try {
+      const response = await fetch(`/api/videos/search?q=${encodeURIComponent(q)}&order=${videoOrder}&duration=${videoDuration}&maxResults=12`);
+      const data = await response.json();
+      let list: CommunityVideo[] = Array.isArray(data.videos) ? data.videos : [];
+
+      if (list.length === 0) {
+        try {
+          const fallbackResponse = await fetch('/api/backboard/search', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              query: `Find relevant community or educational videos and guides for: ${q}. Preferred language: ${interfaceLanguage}.`,
+              location,
+            }),
+          });
+          const fallbackData = await fallbackResponse.json();
+          const fallbackItems: any[] = Array.isArray(fallbackData.items) ? fallbackData.items : [];
+          list = fallbackItems.slice(0, 12).map((item: any, index: number) => ({
+            video_id: item.id || `backboard-video-${index}`,
+            title: item.title || "Community Guide",
+            channel_name: item.source_name || "Backboard",
+            channel_type: "educational",
+            published_date: item.date_start || item.retrieved_at || new Date().toISOString(),
+            duration: "",
+            duration_minutes: null,
+            thumbnail: "",
+            description: item.description || "",
+            watch_url: item.source_url || "",
+            embed_url: "",
+            local_relevance: "medium",
+          }));
+        } catch {
+          // Ignore fallback errors.
+        }
+      }
+
+      const filtered = videoChannelType === 'all' ? list : list.filter((v) => v.channel_type === videoChannelType);
+      setVideos(filtered);
+      writeSignatureCache(VIDEO_CACHE_KEY, signature, filtered);
+    } catch (err) {
+      console.error('Video search failed', err);
+      setVideos([]);
+    } finally {
+      setVideosLoading(false);
+    }
+  };
+
+  const fetchArtists = async (query = searchQuery) => {
+    const q = query.trim();
+    const signature = [
+      q.toLowerCase(),
+      radiusMiles,
+      interfaceLanguage.toLowerCase(),
+      location ? `${location.latitude.toFixed(3)},${location.longitude.toFixed(3)}` : "noloc",
+    ].join("|");
+    const cached = readSignatureCache(ARTIST_CACHE_KEY, signature);
+    if (Array.isArray(cached) && cached.length > 0) {
+      setArtists(cached);
+      return;
+    }
+    setArtistsLoading(true);
+    try {
+      const response = await fetch('/api/artists/search', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          query: q,
+          location,
+          radius_miles: radiusMiles,
+          page: 1,
+          page_size: 40,
+        }),
+      });
+      const data = await response.json();
+      let list: LocalArtist[] = Array.isArray(data.artists) ? data.artists : [];
+
+      if (list.length === 0) {
+        try {
+          const fallbackResponse = await fetch('/api/backboard/search', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              query: `Find local artists (music, visual art, performance, digital) near me for: ${q || 'community'}. Preferred language: ${interfaceLanguage}.`,
+              location,
+            }),
+          });
+          const fallbackData = await fallbackResponse.json();
+          const fallbackItems: any[] = Array.isArray(fallbackData.items) ? fallbackData.items : [];
+          list = fallbackItems.map((item: any, idx: number) => {
+            const coords = normalizeCoordinates(
+              item.lat != null ? Number(item.lat) : (item.latitude != null ? Number(item.latitude) : null),
+              item.lon != null ? Number(item.lon) : (item.longitude != null ? Number(item.longitude) : null)
+            );
+            const dist = location && coords
+              ? calculateDistance(location.latitude, location.longitude, coords.lat, coords.lon)
+              : null;
+            return {
+              artist_name: item.title || `Local Artist ${idx + 1}`,
+              category: 'other',
+              style: item.type || 'Community',
+              location: item.location_name || item.address || 'Not listed',
+              distance_miles: dist != null ? Number(dist.toFixed(1)) : null,
+              description: item.description || 'Not listed',
+              website: item.source_url || '',
+              social_links: [],
+              upcoming_events: [],
+              lat: coords?.lat ?? null,
+              lon: coords?.lon ?? null,
+              confidence: { overall: coords ? 'medium' : 'low' },
+            };
+          });
+        } catch {
+          // Ignore fallback errors.
+        }
+      }
+
+      const deduped = list.filter((artist, idx, arr) => {
+        const key = `${artist.artist_name.toLowerCase()}|${artist.location.toLowerCase()}`;
+        return arr.findIndex((a) => `${a.artist_name.toLowerCase()}|${a.location.toLowerCase()}` === key) === idx;
+      });
+      setArtists(deduped);
+      writeSignatureCache(ARTIST_CACHE_KEY, signature, deduped);
+    } catch (err) {
+      console.error('Artist search failed', err);
+      setArtists([]);
+    } finally {
+      setArtistsLoading(false);
+    }
+  };
+
+  const fetchHelpSupportData = async () => {
+    if (activeTab !== 'clinics_legal') return;
+    setHelpSupportLoading(true);
+    try {
+      if (helpSupportSection === 'translators') {
+        const response = await fetch('/api/help-support/translators', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            location,
+            radius_miles: radiusMiles,
+            language_needed: translatorLanguageNeeded
+              ? translatorLanguageNeeded.split(',').map((s) => s.trim()).filter(Boolean)
+              : [],
+            service_type: translatorServiceType,
+            mode: translatorMode,
+            specialization: translatorSpecialization,
+            cost: translatorCost,
+            availability: translatorAvailability,
+          }),
+        });
+        const data = await response.json();
+        setTranslatorItems(Array.isArray(data.translators) ? data.translators : []);
+      } else if (helpSupportSection === 'newcomer_guides') {
+        const response = await fetch('/api/help-support/newcomer-guides', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            location,
+            language: newcomerLanguage,
+            topic: newcomerTopic,
+            format: newcomerFormat,
+          }),
+        });
+        const data = await response.json();
+        setNewcomerGuideItems(Array.isArray(data.guides) ? data.guides : []);
+      }
+    } catch (err) {
+      console.error('Help & Support fetch failed', err);
+      if (helpSupportSection === 'translators') setTranslatorItems([]);
+      if (helpSupportSection === 'newcomer_guides') setNewcomerGuideItems([]);
+    } finally {
+      setHelpSupportLoading(false);
+    }
+  };
+
+  const sendAssistantQuery = async () => {
+    const text = assistantDraft.trim();
+    if (!text) return;
+    setAssistantMessages((prev) => [...prev, { role: 'user', text }]);
+    setAssistantDraft('');
+    try {
+      const response = await fetch('/api/assistant/query', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ message: text, location }),
+      });
+      const data = await response.json();
+      setAssistantMessages((prev) => [...prev, { role: 'assistant', text: data.answer || 'No response.', suggestions: data.suggestions || [] }]);
+    } catch {
+      setAssistantMessages((prev) => [...prev, { role: 'assistant', text: 'Assistant unavailable right now.' }]);
+    }
+  };
+
   const hydrateCoordinates = async (baseItems: CommunityItem[], tabForCache: Tab) => {
-    const candidates = baseItems
+    let workingItems = [...baseItems];
+    const candidates = workingItems
       .filter((item) => (item.latitude == null || item.longitude == null) && getGeocodeQuery(item))
       .slice(0, 1000);
     if (candidates.length === 0) return;
 
-    const queries = [...new Set(candidates.map((item) => getGeocodeQuery(item)))];
+    try {
+      const repairResponse = await fetch('/api/listings/repair', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ items: candidates }),
+      });
+      const repairData = await repairResponse.json();
+      const repairedItems: CommunityItem[] = Array.isArray(repairData?.items) ? repairData.items : [];
+      if (repairedItems.length > 0) {
+        const repairedById = new Map(repairedItems.filter((r) => r.id).map((r) => [r.id, r]));
+        workingItems = workingItems.map((item) => {
+          const repaired = item.id ? repairedById.get(item.id) : undefined;
+          if (!repaired) return item;
+          return {
+            ...item,
+            address: repaired.address || item.address,
+            location_name: repaired.location_name || item.location_name,
+            description: repaired.description || item.description,
+          };
+        });
+      }
+    } catch {
+      // Ignore repair errors and continue with raw data.
+    }
+
+    const queries = [...new Set(
+      workingItems
+        .filter((item) => (item.latitude == null || item.longitude == null) && getGeocodeQuery(item))
+        .map((item) => getGeocodeQuery(item))
+    )];
     if (queries.length === 0) return;
 
     try {
@@ -416,17 +978,19 @@ export default function App() {
       const map = data?.results || {};
       if (!map || Object.keys(map).length === 0) return;
 
-      const updated = baseItems.map((item) => {
+      const updated: CommunityItem[] = workingItems.map((item): CommunityItem => {
         if (item.latitude != null && item.longitude != null) return item;
         const q = getGeocodeQuery(item);
         const hit = map[q];
-        if (!hit?.lat || !hit?.lon) return item;
+        const normalized = normalizeCoordinates(Number(hit?.lat), Number(hit?.lon));
+        if (!normalized) return item;
         return {
           ...item,
-          latitude: hit.lat,
-          longitude: hit.lon,
-          lat: hit.lat,
-          lon: hit.lon,
+          latitude: normalized.lat,
+          longitude: normalized.lon,
+          lat: normalized.lat,
+          lon: normalized.lon,
+          location_confidence: 'medium' as const,
         };
       });
       const deduped = dedupeCommunityItems(updated);
@@ -437,6 +1001,85 @@ export default function App() {
     }
   };
 
+  const mapPayloadToItems = (tab: Tab, data: any): CommunityItem[] => {
+    return [
+      ...(data.items || []).map((item: any, index: number) => ({
+        ...(normalizeCoordinates(
+          item.lat != null ? Number(item.lat) : (item.latitude != null ? Number(item.latitude) : null),
+          item.lon != null ? Number(item.lon) : (item.longitude != null ? Number(item.longitude) : null)
+        ) || {}),
+        ...item,
+        id: item.id || `result-${tab}-${index}-${(item.title || item.name || 'item').toLowerCase().replace(/\s+/g, '-')}`,
+        description: item.description || "",
+        retrieved_at: item.retrieved_at || new Date().toISOString(),
+        latitude: normalizeCoordinates(
+          item.lat != null ? Number(item.lat) : (item.latitude != null ? Number(item.latitude) : null),
+          item.lon != null ? Number(item.lon) : (item.longitude != null ? Number(item.longitude) : null)
+        )?.lat,
+        longitude: normalizeCoordinates(
+          item.lat != null ? Number(item.lat) : (item.latitude != null ? Number(item.latitude) : null),
+          item.lon != null ? Number(item.lon) : (item.longitude != null ? Number(item.longitude) : null)
+        )?.lon,
+        location_confidence: (item.location_confidence === 'high' || item.location_confidence === 'medium' || item.location_confidence === 'low')
+          ? item.location_confidence
+          : ((item.address || item.location_name) ? 'medium' : 'low') as 'high' | 'medium' | 'low',
+        verified_source: typeof item.verified_source === 'boolean' ? item.verified_source : false,
+        recommended_by_users: Number(item.recommended_by_users || 0),
+        neighborhood: item.neighborhood || '',
+        cultural_groups: Array.isArray(item.cultural_groups) ? item.cultural_groups : [],
+        supported_languages: Array.isArray(item.supported_languages) ? item.supported_languages : [],
+        translation_services: Boolean(item.translation_services),
+        translation_languages: Array.isArray(item.translation_languages) ? item.translation_languages : [],
+        immigrant_support: Boolean(item.immigrant_support),
+        newcomer_support: Boolean(item.newcomer_support),
+        event_attendance: item.event_attendance || { interested_count: 0, going_count: 0 },
+        coordinates: (() => {
+          const c = normalizeCoordinates(
+            item.lat != null ? Number(item.lat) : (item.latitude != null ? Number(item.latitude) : null),
+            item.lon != null ? Number(item.lon) : (item.longitude != null ? Number(item.longitude) : null)
+          );
+          return c ? [c.lat, c.lon] as [number, number] : undefined;
+        })()
+      })),
+      ...(data.organizations || []).map((org: any, index: number) => ({
+        ...org,
+        id: org.id || `org-${tab}-${index}-${(org.name || 'organization').toLowerCase().replace(/\s+/g, '-')}`,
+        title: org.name,
+        description: org.description || "",
+        retrieved_at: org.retrieved_at || new Date().toISOString(),
+        type: 'organization',
+        audience: 'general',
+        latitude: normalizeCoordinates(
+          org.lat != null ? Number(org.lat) : (org.latitude != null ? Number(org.latitude) : null),
+          org.lon != null ? Number(org.lon) : (org.longitude != null ? Number(org.longitude) : null)
+        )?.lat,
+        longitude: normalizeCoordinates(
+          org.lat != null ? Number(org.lat) : (org.latitude != null ? Number(org.latitude) : null),
+          org.lon != null ? Number(org.lon) : (org.longitude != null ? Number(org.longitude) : null)
+        )?.lon,
+        location_confidence: (org.location_confidence === 'high' || org.location_confidence === 'medium' || org.location_confidence === 'low')
+          ? org.location_confidence
+          : ((org.address || org.location_name) ? 'medium' : 'low') as 'high' | 'medium' | 'low',
+        verified_source: typeof org.verified_source === 'boolean' ? org.verified_source : false,
+        recommended_by_users: Number(org.recommended_by_users || 0),
+        neighborhood: org.neighborhood || '',
+        cultural_groups: Array.isArray(org.cultural_groups) ? org.cultural_groups : [],
+        supported_languages: Array.isArray(org.supported_languages) ? org.supported_languages : [],
+        translation_services: Boolean(org.translation_services),
+        translation_languages: Array.isArray(org.translation_languages) ? org.translation_languages : [],
+        immigrant_support: Boolean(org.immigrant_support),
+        newcomer_support: Boolean(org.newcomer_support),
+        coordinates: (() => {
+          const c = normalizeCoordinates(
+            org.lat != null ? Number(org.lat) : (org.latitude != null ? Number(org.latitude) : null),
+            org.lon != null ? Number(org.lon) : (org.longitude != null ? Number(org.longitude) : null)
+          );
+          return c ? [c.lat, c.lon] as [number, number] : undefined;
+        })()
+      }))
+    ];
+  };
+
   const handleSearch = async (tab: Tab, forceRefresh = false) => {
     setLoading(true);
     setError(null);
@@ -444,7 +1087,7 @@ export default function App() {
     if (!forceRefresh) {
       const localCache = readLocalTabCache(tab);
       if (localCache && localCache.items.length > 0) {
-        const cached = dedupeCommunityItems(localCache.items);
+        const cached = dedupeCommunityItems(tab === 'events' ? prunePastEvents(localCache.items) : localCache.items);
         setItems(cached);
         setSummary(normalizeSummary(localCache.summary));
         hydrateCoordinates(cached, tab);
@@ -455,7 +1098,7 @@ export default function App() {
         const cachedResponse = await fetch(`/api/items/${tab}`);
         const cachedData = await cachedResponse.json();
         if (cachedData.items && cachedData.items.length > 0) {
-          const dedupedCached = dedupeCommunityItems(cachedData.items);
+          const dedupedCached = dedupeCommunityItems(tab === 'events' ? prunePastEvents(cachedData.items) : cachedData.items);
           setItems(dedupedCached);
           const clean = normalizeSummary(cachedData.summary || '');
           setSummary(clean);
@@ -475,7 +1118,7 @@ export default function App() {
         query = "Find all community resources nearby including events, volunteering, food banks, and organizations.";
         break;
       case 'events':
-        query = "Find community events nearby. Categorize them as 'student', 'professional', or 'general'. For student events, identify field of study and academic level.";
+        query = `Find community events nearby (upcoming by default). Include language-specific and cultural events when relevant. Search hint: ${searchQuery || 'general community events'}.`;
         break;
       case 'volunteer':
         query = "Find volunteering opportunities nearby. Categorize them as 'student', 'professional', or 'general'.";
@@ -484,10 +1127,10 @@ export default function App() {
         query = "Find food banks nearby. Categorize them as 'general'.";
         break;
       case 'organizations':
-        query = "Find local organizations providing essential services like homeless shelters, legal aid, medical clinics, and food assistance.";
+        query = `Find local organizations including cultural organizations, language support, translation services, immigrant/newcomer resources, shelters, legal aid, clinics, and food assistance. Cultural filter: ${orgCulturalGroupFilter || 'none'}. Language filter: ${orgLanguageFilter || 'none'}. Search hint: ${searchQuery || 'community organizations'}.`;
         break;
       case 'clinics_legal':
-        query = "Find nearby clinics and legal aid resources, including free clinics, legal aid offices, and support services.";
+        query = `Find nearby help and support resources including clinics, legal aid, shelters, translators/interpreters, and newcomer support guides. Focus section: ${helpSupportSection}.`;
         break;
       case 'map_view':
         query = "Find all nearby events, volunteer opportunities, food assistance, organizations, clinics, shelters, and legal aid resources with coordinates for map display.";
@@ -499,31 +1142,7 @@ export default function App() {
 
     try {
       const data = await fetchCommunityData(query, location || undefined);
-      const mappedItems: CommunityItem[] = [
-        ...data.items.map((item: any, index: number) => ({
-          ...item,
-          id: item.id || `result-${tab}-${index}-${(item.title || item.name || 'item').toLowerCase().replace(/\s+/g, '-')}`,
-          description: item.description || "",
-          retrieved_at: item.retrieved_at || new Date().toISOString(),
-          latitude: item.lat || item.latitude,
-          longitude: item.lon || item.longitude,
-          coordinates: (item.lat != null && item.lon != null) ? [item.lat, item.lon] : 
-                       (item.latitude != null && item.longitude != null) ? [item.latitude, item.longitude] : undefined
-        })),
-        ...data.organizations.map((org: any, index: number) => ({
-          ...org,
-          id: org.id || `org-${tab}-${index}-${(org.name || 'organization').toLowerCase().replace(/\s+/g, '-')}`,
-          title: org.name,
-          description: org.description || "",
-          retrieved_at: org.retrieved_at || new Date().toISOString(),
-          type: 'organization',
-          audience: 'general',
-          latitude: org.lat || org.latitude,
-          longitude: org.lon || org.longitude,
-          coordinates: (org.lat != null && org.lon != null) ? [org.lat, org.lon] : 
-                       (org.latitude != null && org.longitude != null) ? [org.latitude, org.longitude] : undefined
-        }))
-      ];
+      const mappedItems: CommunityItem[] = mapPayloadToItems(tab, data);
       
       const dedupedMapped = dedupeCommunityItems(mappedItems);
       setItems(dedupedMapped);
@@ -562,12 +1181,38 @@ export default function App() {
   }, [activeTab, location]);
 
   useEffect(() => {
+    if (activeTab !== 'organizations') return;
+    const timer = setTimeout(() => {
+      handleSearch('organizations', true);
+    }, 350);
+    return () => clearTimeout(timer);
+  }, [activeTab, orgCulturalGroupFilter, orgLanguageFilter]);
+
+  useEffect(() => {
+    if (activeTab !== 'clinics_legal') return;
+    if (helpSupportSection === 'translators' || helpSupportSection === 'newcomer_guides') return;
+    const timer = setTimeout(() => {
+      handleSearch('clinics_legal', true);
+    }, 250);
+    return () => clearTimeout(timer);
+  }, [activeTab, helpSupportSection]);
+
+  useEffect(() => {
+    if (activeTab !== 'clinics_legal') return;
+    if (helpSupportSection === 'clinics') setClinicServiceFilter('clinic');
+    else if (helpSupportSection === 'legal_aid') setClinicServiceFilter('legal_aid');
+    else if (helpSupportSection === 'shelters') setClinicServiceFilter('shelter');
+  }, [activeTab, helpSupportSection]);
+
+  useEffect(() => {
     if (activeTab === 'map_view') {
       setViewMode('split');
       setAudienceFilter('all');
+      setMapScope('radius');
     }
     if (activeTab === 'events') {
       setSortBy('soonest');
+      setMapScope('radius');
     }
   }, [activeTab]);
 
@@ -614,8 +1259,51 @@ export default function App() {
     return () => clearInterval(interval);
   }, [selectedConnection, activeTab]);
 
-  const filteredItems = useMemo(() => {
-    const list = activeTab === 'mylist' ? myList : items;
+  useEffect(() => {
+    if (activeTab === 'connections') {
+      setArtists([]);
+      return;
+    }
+    const q = searchQuery.trim()
+      ? `${searchQuery.trim()} local artists`
+      : `local artists near me ${activeTab === 'events' ? 'with upcoming performances' : ''}`.trim();
+    fetchArtists(q);
+  }, [activeTab, searchQuery, location, radiusMiles, interfaceLanguage]);
+
+  useEffect(() => {
+    const q = searchQuery || (activeTab === 'events' ? 'community events near me' : '');
+    if (!q) {
+      setVideos([]);
+      return;
+    }
+    const timer = setTimeout(() => fetchVideos(q), 350);
+    return () => clearTimeout(timer);
+  }, [searchQuery, activeTab, videoOrder, videoDuration, videoChannelType, interfaceLanguage, location]);
+
+  useEffect(() => {
+    if (activeTab !== 'clinics_legal') return;
+    if (helpSupportSection !== 'translators' && helpSupportSection !== 'newcomer_guides') return;
+    const timer = setTimeout(() => {
+      fetchHelpSupportData();
+    }, 300);
+    return () => clearTimeout(timer);
+  }, [
+    activeTab,
+    helpSupportSection,
+    location,
+    radiusMiles,
+    translatorLanguageNeeded,
+    translatorServiceType,
+    translatorMode,
+    translatorSpecialization,
+    translatorCost,
+    translatorAvailability,
+    newcomerLanguage,
+    newcomerTopic,
+    newcomerFormat,
+  ]);
+
+  const applyFilters = (list: CommunityItem[]) => {
     let filtered = [...list];
 
     // Search Query
@@ -623,17 +1311,22 @@ export default function App() {
       const q = searchQuery.toLowerCase();
       filtered = filtered.filter(item => 
         (item.title || item.name || "").toLowerCase().includes(q) || 
-        (item.description || "").toLowerCase().includes(q)
+        (item.description || "").toLowerCase().includes(q) ||
+        (item.cultural_groups || []).some((g) => g.toLowerCase().includes(q)) ||
+        (item.supported_languages || []).some((l) => l.toLowerCase().includes(q)) ||
+        (item.translation_languages || []).some((l) => l.toLowerCase().includes(q))
       );
     }
 
-    // Audience Filter
-    if (audienceFilter !== 'all') {
+    const supportsAudienceFilter = activeTab === 'events' || activeTab === 'volunteer' || activeTab === 'map_view';
+
+    // Audience Filter (only tabs that support audience segmentation).
+    if (supportsAudienceFilter && audienceFilter !== 'all') {
       filtered = filtered.filter(item => item.audience === audienceFilter);
     }
 
     // Student Specific Filters
-    if (audienceFilter === 'student') {
+    if (supportsAudienceFilter && audienceFilter === 'student') {
       if (fieldOfStudy !== 'all') {
         filtered = filtered.filter(item => item.fieldOfStudy?.toLowerCase().includes(fieldOfStudy.toLowerCase()));
       }
@@ -646,7 +1339,7 @@ export default function App() {
     }
 
     // Professional Specific Filters
-    if (audienceFilter === 'professional') {
+    if (supportsAudienceFilter && audienceFilter === 'professional') {
       if (industry !== 'all') {
         filtered = filtered.filter(item => item.industry?.toLowerCase().includes(industry.toLowerCase()));
       }
@@ -660,12 +1353,69 @@ export default function App() {
 
     // Org Specific Filters
     if (activeTab === 'organizations') {
+      const originalOrganizations = [...filtered];
       if (orgCategoryFilter !== 'all') {
         filtered = filtered.filter(item => item.category === orgCategoryFilter);
       }
+      if (orgCulturalGroupFilter.trim()) {
+        const q = orgCulturalGroupFilter.trim().toLowerCase();
+        filtered = filtered.filter((item) =>
+          (item.cultural_groups || []).some((g) => g.toLowerCase().includes(q)) ||
+          (item.description || '').toLowerCase().includes(q) ||
+          (item.title || '').toLowerCase().includes(q)
+        );
+      }
+      if (orgLanguageFilter.trim()) {
+        const q = orgLanguageFilter.trim().toLowerCase();
+        filtered = filtered.filter((item) =>
+          (item.supported_languages || []).some((l) => l.toLowerCase().includes(q)) ||
+          (item.translation_languages || []).some((l) => l.toLowerCase().includes(q)) ||
+          (item.description || '').toLowerCase().includes(q)
+        );
+      }
+      if (orgTranslationOnly) {
+        filtered = filtered.filter((item) => item.translation_services);
+      }
+      if (orgImmigrantSupportOnly) {
+        filtered = filtered.filter((item) => item.immigrant_support);
+      }
+      if (orgNewcomerSupportOnly) {
+        filtered = filtered.filter((item) => item.newcomer_support);
+      }
+      if (
+        filtered.length === 0 &&
+        (orgCulturalGroupFilter.trim() || orgLanguageFilter.trim() || orgTranslationOnly || orgImmigrantSupportOnly || orgNewcomerSupportOnly)
+      ) {
+        const relaxedTerm = `${orgCulturalGroupFilter} ${orgLanguageFilter}`.trim().toLowerCase();
+        filtered = originalOrganizations.filter((item) => {
+          const text = `${item.title || ''} ${item.description || ''} ${(item.supported_languages || []).join(' ')} ${(item.cultural_groups || []).join(' ')}`.toLowerCase();
+          if (!relaxedTerm) return true;
+          return relaxedTerm.split(/\s+/).some((token) => token.length > 1 && text.includes(token));
+        });
+      }
     }
     if (activeTab === 'clinics_legal') {
-      filtered = filtered.filter(item => item.type === 'clinic' || item.type === 'legal_aid');
+      if (helpSupportSection === 'translators' || helpSupportSection === 'newcomer_guides') {
+        filtered = [];
+      } else {
+        filtered = filtered.filter((item) => isClinicLegalItem(item));
+      }
+    }
+
+    if (activeTab === 'foodbanks') {
+      filtered = filtered.filter((item) => isFoodItem(item));
+      if (foodTypeFilter !== 'all') {
+        filtered = filtered.filter((item) => (item.type || '').toLowerCase() === foodTypeFilter);
+      }
+    }
+
+    if (activeTab === 'clinics_legal' && clinicServiceFilter !== 'all') {
+      filtered = filtered.filter((item) => {
+        const itemType = (item.type || '').toLowerCase();
+        const itemCategory = (item.category || '').toLowerCase();
+        if (clinicServiceFilter === 'lawyer') return itemCategory === 'lawyer';
+        return itemType === clinicServiceFilter || itemCategory === clinicServiceFilter;
+      });
     }
 
     // Events-specific date logic: upcoming-only by default.
@@ -687,7 +1437,8 @@ export default function App() {
         if (isUndated && !includeUndatedEvents) return false;
 
         let isUpcoming = false;
-        if (start) isUpcoming = start >= now;
+        if (start && end) isUpcoming = end >= now;
+        else if (start) isUpcoming = start >= now;
         else if (end) isUpcoming = end >= now;
 
         if (!includePastEvents && !isUndated && !isUpcoming) return false;
@@ -713,16 +1464,18 @@ export default function App() {
     // Add distance and Sort
     if (location) {
       filtered = filtered.map(item => {
-        const lat = item.latitude || item.lat;
-        const lon = item.longitude || item.lon;
-        if (lat != null && lon != null) {
+        const coords = normalizeCoordinates(
+          item.latitude != null ? Number(item.latitude) : (item.lat != null ? Number(item.lat) : null),
+          item.longitude != null ? Number(item.longitude) : (item.lon != null ? Number(item.lon) : null)
+        );
+        if (coords) {
           const dist = calculateDistance(
             location.latitude, 
             location.longitude, 
-            lat, 
-            lon
+            coords.lat,
+            coords.lon
           );
-          return { ...item, distance_miles: dist };
+          return { ...item, latitude: coords.lat, longitude: coords.lon, lat: coords.lat, lon: coords.lon, distance_miles: dist };
         }
         return item;
       });
@@ -754,7 +1507,191 @@ export default function App() {
     });
 
     return filtered;
-  }, [items, myList, activeTab, audienceFilter, location, searchQuery, sortBy, fieldOfStudy, academicLevel, careerFocus, industry, seniorityLevel, networkingVsTraining, orgCategoryFilter, radiusMiles, eventWindow, includePastEvents, includeUndatedEvents, eventTypeFilter, customDateStart, customDateEnd]);
+  };
+
+  const filteredItems = useMemo(() => {
+    const list = activeTab === 'mylist' ? myList : items;
+    return applyFilters(list);
+  }, [items, myList, activeTab, helpSupportSection, audienceFilter, location, searchQuery, sortBy, fieldOfStudy, academicLevel, careerFocus, industry, seniorityLevel, networkingVsTraining, orgCategoryFilter, orgCulturalGroupFilter, orgLanguageFilter, orgTranslationOnly, orgImmigrantSupportOnly, orgNewcomerSupportOnly, foodTypeFilter, clinicServiceFilter, radiusMiles, eventWindow, includePastEvents, includeUndatedEvents, eventTypeFilter, customDateStart, customDateEnd]);
+
+  useEffect(() => {
+    if (activeTab === 'connections' || activeTab === 'mylist') return;
+    if (viewMode !== 'map' && viewMode !== 'split') return;
+    const hasMissingCoordinates = filteredItems.some(
+      (item) => (item.latitude == null || item.longitude == null) && !!getGeocodeQuery(item)
+    );
+    if (!hasMissingCoordinates) return;
+    hydrateCoordinates(filteredItems, activeTab);
+  }, [viewMode, activeTab, filteredItems]);
+
+  const displayedItems = useMemo(() => {
+    if (mapScope !== 'viewport' || !viewportBounds) return filteredItems;
+    return filteredItems.filter((item) => {
+      const coords = normalizeCoordinates(
+        item.latitude != null ? Number(item.latitude) : (item.lat != null ? Number(item.lat) : null),
+        item.longitude != null ? Number(item.longitude) : (item.lon != null ? Number(item.lon) : null)
+      );
+      if (!coords) return false;
+      return (
+        coords.lat <= viewportBounds.north &&
+        coords.lat >= viewportBounds.south &&
+        coords.lon <= viewportBounds.east &&
+        coords.lon >= viewportBounds.west
+      );
+    });
+  }, [filteredItems, mapScope, viewportBounds]);
+
+  const artistItems = useMemo<CommunityItem[]>(() => {
+    return artists
+      .filter((artist) => normalizeCoordinates(artist.lat, artist.lon))
+      .map((artist, idx) => {
+        const c = normalizeCoordinates(artist.lat, artist.lon)!;
+        return {
+          id: `artist-${idx}-${artist.artist_name.toLowerCase().replace(/\s+/g, '-')}`,
+          entity_kind: 'resource',
+          title: artist.artist_name,
+          description: artist.description,
+          type: 'resource_center',
+          audience: 'general',
+          location_name: artist.location,
+          address: artist.location,
+          latitude: c.lat,
+          longitude: c.lon,
+          lat: c.lat,
+          lon: c.lon,
+          distance_miles: artist.distance_miles ?? undefined,
+          source_name: 'Local Artist Discovery',
+          source_url: artist.website || '',
+          location_confidence: 'medium',
+          needs_review: false,
+          neighborhood: '',
+          category: 'resource_center',
+        };
+      });
+  }, [artists]);
+
+  const translatorMapItems = useMemo<CommunityItem[]>(() => {
+    if (activeTab !== 'clinics_legal' || helpSupportSection !== 'translators') return [];
+    return translatorItems
+      .filter((t) => normalizeCoordinates(t.lat, t.lon))
+      .map((t, idx) => {
+        const c = normalizeCoordinates(t.lat, t.lon)!;
+        return {
+          id: `translator-${idx}-${t.name.toLowerCase().replace(/\s+/g, '-')}`,
+          entity_kind: 'resource',
+          title: t.name,
+          description: t.notes || 'Translation/interpretation service',
+          type: t.service_type === 'translator' ? 'resource_center' : 'resource_center',
+          audience: 'general',
+          location_name: t.service_area || t.address,
+          address: t.address,
+          latitude: c.lat,
+          longitude: c.lon,
+          lat: c.lat,
+          lon: c.lon,
+          distance_miles: undefined,
+          source_name: t.source_name,
+          source_url: t.source_url,
+          location_confidence: t.confidence?.overall === 'high' ? 'high' : 'medium',
+          needs_review: false,
+          category: 'resource_center',
+        };
+      });
+  }, [translatorItems, activeTab, helpSupportSection]);
+
+  const displayedItemsWithArtists = useMemo(() => {
+    if (activeTab === 'organizations' || activeTab === 'map_view') {
+      return [...displayedItems, ...artistItems, ...translatorMapItems];
+    }
+    if (activeTab === 'clinics_legal' && helpSupportSection === 'translators') return [...displayedItems, ...translatorMapItems];
+    return displayedItems;
+  }, [displayedItems, artistItems, translatorMapItems, activeTab, helpSupportSection]);
+
+  useEffect(() => {
+    const hasIntent = Boolean(
+      searchQuery.trim() ||
+      orgLanguageFilter.trim() ||
+      orgCulturalGroupFilter.trim() ||
+      (activeTab === 'events' && interfaceLanguage.trim())
+    );
+    if (!hasIntent) return;
+    if (loading || autoRescueLoading) return;
+    if (activeTab === 'connections' || activeTab === 'mylist') return;
+    if (displayedItemsWithArtists.length > 0) return;
+
+    const signature = [
+      activeTab,
+      searchQuery.trim().toLowerCase(),
+      orgLanguageFilter.trim().toLowerCase(),
+      orgCulturalGroupFilter.trim().toLowerCase(),
+      interfaceLanguage.trim().toLowerCase(),
+      radiusMiles,
+    ].join('|');
+    if (signature === autoRescueSignature) return;
+
+    setAutoRescueSignature(signature);
+    setAutoRescueLoading(true);
+    (async () => {
+      try {
+        const rescueQuery = [
+          `Use live web search and maps to find ${activeTab} near me.`,
+          `Preferred interface language: ${interfaceLanguage}.`,
+          orgLanguageFilter ? `Language requirement: ${orgLanguageFilter}.` : "",
+          orgCulturalGroupFilter ? `Cultural requirement: ${orgCulturalGroupFilter}.` : "",
+          searchQuery ? `User query: ${searchQuery}.` : "",
+          "Return events and organizations with source URLs, corrected dates, and valid addresses."
+        ].filter(Boolean).join(" ");
+        const data = await fetchCommunityData(rescueQuery, location || undefined);
+        const mapped = dedupeCommunityItems(mapPayloadToItems(activeTab, data));
+        if (mapped.length > 0) {
+          setItems(mapped);
+          const msg = `No exact local match found. Expanded with AI web search (${interfaceLanguage}).`;
+          setSummary(msg);
+          writeLocalTabCache(activeTab, mapped, msg);
+          hydrateCoordinates(mapped, activeTab);
+        } else {
+          setSummary(t(interfaceLanguage, 'no_exact_match'));
+        }
+      } catch {
+        // Ignore and keep existing empty-state message.
+      } finally {
+        setAutoRescueLoading(false);
+      }
+    })();
+  }, [
+    activeTab,
+    searchQuery,
+    orgLanguageFilter,
+    orgCulturalGroupFilter,
+    interfaceLanguage,
+    radiusMiles,
+    displayedItemsWithArtists.length,
+    loading,
+    autoRescueLoading,
+    autoRescueSignature,
+    location,
+  ]);
+
+  const mapDebug = useMemo(() => {
+    const withCoordinates = displayedItemsWithArtists.filter((item) => {
+      const c = normalizeCoordinates(
+        item.latitude != null ? Number(item.latitude) : (item.lat != null ? Number(item.lat) : null),
+        item.longitude != null ? Number(item.longitude) : (item.lon != null ? Number(item.lon) : null)
+      );
+      return Boolean(c);
+    }).length;
+    return {
+      total_results: displayedItemsWithArtists.length,
+      results_with_coordinates: withCoordinates,
+      markers_displayed: withCoordinates,
+    };
+  }, [displayedItemsWithArtists]);
+  const layoutDebug = {
+    sidebar_width_px: 260,
+    content_start_px: 260,
+    content_width_px: 1200,
+    horizontal_gap_px: 0,
+  };
 
   const toggleMyList = (item: CommunityItem) => {
     setMyList(prev => {
@@ -767,11 +1704,32 @@ export default function App() {
   };
 
   const isInList = (id: string) => myList.some(i => i.id === id);
+  const toggleGroupMembership = (groupId: string) => {
+    setGroups((prev) =>
+      prev.map((g) =>
+        g.group_id === groupId
+          ? { ...g, joined: !g.joined, member_count: g.member_count + (g.joined ? -1 : 1) }
+          : g
+      )
+    );
+  };
+  const incrementAttendance = (itemId: string, kind: 'interested' | 'going') => {
+    setAttendance((prev) => {
+      const current = prev[itemId] || { interested: 0, going: 0 };
+      return {
+        ...prev,
+        [itemId]: {
+          ...current,
+          [kind]: current[kind] + 1,
+        },
+      };
+    });
+  };
 
   return (
     <div className="min-h-screen md:flex">
       <aside className={cn(
-        "fixed md:sticky md:top-0 left-0 top-0 h-screen md:h-screen z-[120] w-72 bg-[var(--card-bg)] border-r border-[var(--border-color)] p-4 overflow-y-auto transition-transform",
+        "fixed md:sticky md:top-0 left-0 top-0 h-screen md:h-screen z-[120] w-[260px] bg-[var(--card-bg)] border-r border-[var(--border-color)] p-4 overflow-y-auto transition-transform",
         sidebarOpen ? "translate-x-0" : "-translate-x-full md:translate-x-0"
       )}>
         <div className="flex items-center justify-between mb-4">
@@ -781,15 +1739,15 @@ export default function App() {
           </button>
         </div>
         <div className="space-y-2">
-          <SidebarItem active={activeTab === 'events'} label="Events" icon={<Calendar size={16} />} onClick={() => { setActiveTab('events'); setSidebarOpen(false); }} />
-          <SidebarItem active={activeTab === 'volunteer'} label="Volunteer Opportunities" icon={<Heart size={16} />} onClick={() => { setActiveTab('volunteer'); setSidebarOpen(false); }} />
-          <SidebarItem active={activeTab === 'foodbanks'} label="Food Banks & Donations" icon={<ShoppingBasket size={16} />} onClick={() => { setActiveTab('foodbanks'); setSidebarOpen(false); }} />
-          <SidebarItem active={activeTab === 'organizations'} label="Organizations" icon={<Building2 size={16} />} onClick={() => { setActiveTab('organizations'); setSidebarOpen(false); }} />
-          <SidebarItem active={activeTab === 'clinics_legal'} label="Clinics & Legal Aid" icon={<Info size={16} />} onClick={() => { setActiveTab('clinics_legal'); setSidebarOpen(false); }} />
-          <SidebarItem active={activeTab === 'connections'} label="Connections" icon={<MessageCircle size={16} />} onClick={() => { setActiveTab('connections'); setSidebarOpen(false); }} />
-          <SidebarItem active={activeTab === 'mylist'} label="Saved Items" icon={<Bookmark size={16} />} onClick={() => { setActiveTab('mylist'); setSidebarOpen(false); }} />
-          <SidebarItem active={activeTab === 'map_view'} label="Map (All Categories)" icon={<MapIcon size={16} />} onClick={() => { setActiveTab('map_view'); setViewMode('split'); setSidebarOpen(false); }} />
-          <SidebarItem active={showSettings} label="Settings" icon={<Settings size={16} />} onClick={() => { setShowSettings(true); setSidebarOpen(false); }} />
+          <SidebarItem active={activeTab === 'events'} label={t(interfaceLanguage, 'events')} icon={<Calendar size={16} />} onClick={() => { setActiveTab('events'); setSidebarOpen(false); }} />
+          <SidebarItem active={activeTab === 'volunteer'} label={t(interfaceLanguage, 'volunteer')} icon={<Heart size={16} />} onClick={() => { setActiveTab('volunteer'); setSidebarOpen(false); }} />
+          <SidebarItem active={activeTab === 'foodbanks'} label={t(interfaceLanguage, 'food')} icon={<ShoppingBasket size={16} />} onClick={() => { setActiveTab('foodbanks'); setSidebarOpen(false); }} />
+          <SidebarItem active={activeTab === 'organizations'} label={t(interfaceLanguage, 'organizations')} icon={<Building2 size={16} />} onClick={() => { setActiveTab('organizations'); setSidebarOpen(false); }} />
+          <SidebarItem active={activeTab === 'clinics_legal'} label={t(interfaceLanguage, 'clinics')} icon={<Info size={16} />} onClick={() => { setActiveTab('clinics_legal'); setSidebarOpen(false); }} />
+          <SidebarItem active={activeTab === 'connections'} label={t(interfaceLanguage, 'connections')} icon={<MessageCircle size={16} />} onClick={() => { setActiveTab('connections'); setSidebarOpen(false); }} />
+          <SidebarItem active={activeTab === 'mylist'} label={t(interfaceLanguage, 'saved')} icon={<Bookmark size={16} />} onClick={() => { setActiveTab('mylist'); setSidebarOpen(false); }} />
+          <SidebarItem active={activeTab === 'map_view'} label={t(interfaceLanguage, 'map')} icon={<MapIcon size={16} />} onClick={() => { setActiveTab('map_view'); setViewMode('split'); setSidebarOpen(false); }} />
+          <SidebarItem active={showSettings} label={t(interfaceLanguage, 'settings')} icon={<Settings size={16} />} onClick={() => { setShowSettings(true); setSidebarOpen(false); }} />
         </div>
         <button
           onClick={() => {
@@ -810,17 +1768,34 @@ export default function App() {
             setSeniorityLevel('all');
             setNetworkingVsTraining('all');
             setOrgCategoryFilter('all');
+            setOrgCulturalGroupFilter('');
+            setOrgLanguageFilter('');
+            setOrgTranslationOnly(false);
+            setOrgImmigrantSupportOnly(false);
+            setOrgNewcomerSupportOnly(false);
+            setFoodTypeFilter('all');
+            setClinicServiceFilter('all');
+            setHelpSupportSection('clinics');
+            setTranslatorLanguageNeeded('');
+            setTranslatorServiceType('both');
+            setTranslatorMode('any');
+            setTranslatorSpecialization('general');
+            setTranslatorCost('any');
+            setTranslatorAvailability('any');
+            setNewcomerLanguage('');
+            setNewcomerTopic('all');
+            setNewcomerFormat('any');
           }}
           className="w-full mt-4 px-4 py-3 rounded-2xl border border-white/10 bg-white/5 hover:bg-white/10 text-sm"
         >
-          Reset Filters
+          {t(interfaceLanguage, 'reset')}
         </button>
       </aside>
       {sidebarOpen && <div className="fixed inset-0 bg-black/40 z-[110] md:hidden" onClick={() => setSidebarOpen(false)} />}
 
-      <div className="flex-1 md:ml-72 px-4 py-6 max-w-7xl">
-      <header className="mb-8 flex flex-col md:flex-row justify-between items-center gap-6">
-        <div className="text-center md:text-left">
+      <div className="flex-1 md:ml-[260px] px-4 md:px-5 py-6 max-w-[1400px]">
+      <header className="mb-8 flex flex-col lg:flex-row justify-between lg:items-start gap-4">
+        <div className="text-center lg:text-left w-full lg:w-auto">
           <button className="md:hidden mb-3 px-3 py-2 rounded-xl bg-white/10 border border-white/10" onClick={() => setSidebarOpen(true)}>
             Menu
           </button>
@@ -835,9 +1810,12 @@ export default function App() {
           <p className="text-xs opacity-55 mt-2">
             Near: {location ? `${location.latitude.toFixed(3)}, ${location.longitude.toFixed(3)}` : 'Approximate area'}
           </p>
+          <p className="text-xs opacity-55">
+            translation_enabled: true • interface_language: {interfaceLanguage}
+          </p>
         </div>
 
-        <div className="flex items-center gap-3 bg-white/10 backdrop-blur-md p-2 rounded-2xl border border-white/20 shadow-lg">
+        <div className="flex flex-wrap items-center justify-center lg:justify-end gap-2 bg-white/10 backdrop-blur-md p-2 rounded-2xl border border-white/20 shadow-lg max-w-full">
           <button 
             onClick={() => setShowSettings(true)}
             aria-label="Open settings"
@@ -845,10 +1823,10 @@ export default function App() {
           >
             <Settings size={20} />
           </button>
-          <div className="w-[1px] h-6 bg-white/20 mx-1" />
+          <div className="w-[1px] h-6 bg-white/20 mx-1 hidden sm:block" />
           <ThemeToggle current={appearance} onSelect={setAppearance} />
-          <div className="w-[1px] h-6 bg-white/20 mx-1" />
-          <div className="flex gap-1">
+          <div className="w-[1px] h-6 bg-white/20 mx-1 hidden sm:block" />
+          <div className="flex flex-wrap gap-1">
           <button 
               onClick={() => setViewMode('grid')}
               aria-label="Grid view"
@@ -866,7 +1844,7 @@ export default function App() {
             <button
               onClick={() => setViewMode('split')}
               aria-label="Split view"
-              className={cn("px-2 rounded-xl transition-all text-xs font-semibold", viewMode === 'split' ? "bg-[#5A5A40] text-white" : "opacity-50 hover:opacity-100")}
+              className={cn("px-2 py-2 rounded-xl transition-all text-xs font-semibold", viewMode === 'split' ? "bg-[#5A5A40] text-white" : "opacity-50 hover:opacity-100")}
             >
               Split
             </button>
@@ -877,62 +1855,76 @@ export default function App() {
       {activeTab !== 'connections' && (
       <div className="mb-8 flex flex-col gap-6">
         <div className="flex flex-wrap items-center justify-between gap-4">
-          <div className="flex items-center gap-2 bg-white/5 p-1 rounded-2xl border border-white/10">
-            <FilterButton 
-              active={audienceFilter === 'all'} 
-              onClick={() => setAudienceFilter('all')}
-              icon={<Users size={16} />}
-              label="All"
-            />
-            <FilterButton 
-              active={audienceFilter === 'student'} 
-              onClick={() => setAudienceFilter('student')}
-              icon={<GraduationCap size={16} />}
-              label="Student"
-            />
-            <FilterButton 
-              active={audienceFilter === 'professional'} 
-              onClick={() => setAudienceFilter('professional')}
-              icon={<Briefcase size={16} />}
-              label="Professional"
-            />
-            <FilterButton 
-              active={audienceFilter === 'families'} 
-              onClick={() => setAudienceFilter('families')}
-              icon={<Heart size={16} />}
-              label="Families"
-            />
-          </div>
+          {(activeTab === 'events' || activeTab === 'volunteer' || activeTab === 'map_view') ? (
+            <div className="flex items-center gap-2 bg-white/5 p-1 rounded-2xl border border-white/10">
+              <FilterButton 
+                active={audienceFilter === 'all'} 
+                onClick={() => setAudienceFilter('all')}
+                icon={<Users size={16} />}
+                label={t(interfaceLanguage, 'all')}
+              />
+              <FilterButton 
+                active={audienceFilter === 'student'} 
+                onClick={() => setAudienceFilter('student')}
+                icon={<GraduationCap size={16} />}
+                label={t(interfaceLanguage, 'student')}
+              />
+              <FilterButton 
+                active={audienceFilter === 'professional'} 
+                onClick={() => setAudienceFilter('professional')}
+                icon={<Briefcase size={16} />}
+                label={t(interfaceLanguage, 'professional')}
+              />
+              <FilterButton 
+                active={audienceFilter === 'families'} 
+                onClick={() => setAudienceFilter('families')}
+                icon={<Heart size={16} />}
+                label={t(interfaceLanguage, 'families')}
+              />
+            </div>
+          ) : (
+            <div className="text-xs uppercase tracking-wider opacity-50 px-1">
+              {activeTab === 'foodbanks' ? 'Food filters' : activeTab === 'clinics_legal' ? 'Help & Support filters' : 'Tab-specific filters'}
+            </div>
+          )}
 
-          <div className="flex items-center gap-3">
+          <div className="flex flex-wrap items-center gap-2 justify-start lg:justify-end w-full lg:w-auto">
             <div className="relative">
               <Search className="absolute left-3 top-1/2 -translate-y-1/2 opacity-30" size={16} />
               <input 
                 type="text" 
-                placeholder="Search resources..."
+                placeholder={t(interfaceLanguage, 'search')}
                 value={searchQuery}
                 onChange={(e) => setSearchQuery(e.target.value)}
-                className="pl-10 pr-4 py-2 bg-white/5 border border-white/10 rounded-xl text-sm focus:outline-none focus:border-[#5A5A40] transition-all w-64"
+                className="pl-10 pr-4 py-2 bg-white/5 border border-white/10 rounded-xl text-sm focus:outline-none focus:border-[#5A5A40] transition-all w-full min-w-[220px] lg:w-64"
               />
             </div>
             <select 
               value={sortBy}
               onChange={(e) => setSortBy(e.target.value as SortBy)}
-              className="px-4 py-2 bg-white/5 border border-white/10 rounded-xl text-sm focus:outline-none focus:border-[#5A5A40] transition-all"
+              className="px-3 py-2 bg-white/5 border border-white/10 rounded-xl text-sm focus:outline-none focus:border-[#5A5A40] transition-all min-w-[180px]"
             >
-              <option value="soonest">Sort by Soonest</option>
-              <option value="distance">Sort by Distance</option>
-              <option value="relevance">Sort by Relevance</option>
-              <option value="newest">Sort by Recently Added</option>
+              <option value="soonest">{t(interfaceLanguage, 'sort_soonest')}</option>
+              <option value="distance">{t(interfaceLanguage, 'sort_distance')}</option>
+              <option value="relevance">{t(interfaceLanguage, 'sort_relevance')}</option>
+              <option value="newest">{t(interfaceLanguage, 'sort_newest')}</option>
             </select>
             <select
               value={radiusMiles}
               onChange={(e) => setRadiusMiles(Number(e.target.value))}
-              className="px-4 py-2 bg-white/5 border border-white/10 rounded-xl text-sm focus:outline-none focus:border-[#5A5A40] transition-all"
+              className="px-3 py-2 bg-white/5 border border-white/10 rounded-xl text-sm focus:outline-none focus:border-[#5A5A40] transition-all min-w-[96px]"
             >
               {[1, 5, 10, 25, 50].map((m) => (
                 <option key={m} value={m}>{m} mi</option>
               ))}
+            </select>
+            <select
+              value={mapScope}
+              onChange={(e) => setMapScope(e.target.value as MapScope)}
+              className="px-3 py-2 bg-white/5 border border-white/10 rounded-xl text-sm focus:outline-none focus:border-[#5A5A40] transition-all min-w-[170px]"
+            >
+              <option value="radius">{t(interfaceLanguage, 'map_scope_radius')}</option>
+              <option value="viewport">{t(interfaceLanguage, 'map_scope_viewport')}</option>
             </select>
           </div>
         </div>
@@ -940,11 +1932,11 @@ export default function App() {
         {activeTab === 'events' && (
           <div className="flex flex-wrap items-center gap-2 bg-white/5 p-3 rounded-2xl border border-white/10">
             <select value={eventWindow} onChange={(e) => setEventWindow(e.target.value as EventWindow)} className="px-3 py-2 bg-white/5 border border-white/10 rounded-xl text-sm">
-              <option value="upcoming_only">Upcoming only</option>
-              <option value="today">Today</option>
-              <option value="this_week">This week</option>
-              <option value="this_month">This month</option>
-              <option value="custom">Custom range</option>
+              <option value="upcoming_only">{t(interfaceLanguage, 'upcoming_only')}</option>
+              <option value="today">{t(interfaceLanguage, 'today')}</option>
+              <option value="this_week">{t(interfaceLanguage, 'this_week')}</option>
+              <option value="this_month">{t(interfaceLanguage, 'this_month')}</option>
+              <option value="custom">{t(interfaceLanguage, 'custom_range')}</option>
             </select>
             {eventWindow === 'custom' && (
               <>
@@ -953,7 +1945,7 @@ export default function App() {
               </>
             )}
             <select value={eventTypeFilter} onChange={(e) => setEventTypeFilter(e.target.value)} className="px-3 py-2 bg-white/5 border border-white/10 rounded-xl text-sm">
-              <option value="all">All types</option>
+              <option value="all">{t(interfaceLanguage, 'all_types')}</option>
               <option value="event">Event</option>
               <option value="workshop">Workshop</option>
               <option value="networking">Networking</option>
@@ -962,18 +1954,123 @@ export default function App() {
             </select>
             <label className="text-xs opacity-80 flex items-center gap-2 px-2">
               <input type="checkbox" checked={includeUndatedEvents} onChange={(e) => setIncludeUndatedEvents(e.target.checked)} />
-              Include undated
+              {t(interfaceLanguage, 'include_undated')}
             </label>
             <label className="text-xs opacity-80 flex items-center gap-2 px-2">
               <input type="checkbox" checked={includePastEvents} onChange={(e) => setIncludePastEvents(e.target.checked)} />
-              Include past events
+              {t(interfaceLanguage, 'include_past')}
             </label>
+          </div>
+        )}
+
+        {activeTab === 'foodbanks' && (
+          <div className="flex flex-wrap items-center gap-2 bg-white/5 p-3 rounded-2xl border border-white/10">
+            <select value={foodTypeFilter} onChange={(e) => setFoodTypeFilter(e.target.value as 'all' | 'foodbank' | 'donation')} className="px-3 py-2 bg-white/5 border border-white/10 rounded-xl text-sm">
+              <option value="all">All food resources</option>
+              <option value="foodbank">Food banks/pantries</option>
+              <option value="donation">Donation drives</option>
+            </select>
+          </div>
+        )}
+
+        {activeTab === 'clinics_legal' && (
+          <div className="bg-white/5 p-3 rounded-2xl border border-white/10 space-y-3">
+            <div className="flex flex-wrap gap-2">
+              {[
+                ['clinics', 'Clinics'],
+                ['legal_aid', 'Legal Aid'],
+                ['shelters', 'Shelters'],
+                ['translators', 'Translators'],
+                ['newcomer_guides', 'Newcomer Guides'],
+              ].map(([key, label]) => (
+                <button
+                  key={key}
+                  onClick={() => setHelpSupportSection(key as HelpSupportSection)}
+                  className={cn(
+                    "px-3 py-1.5 rounded-lg text-xs border border-white/10",
+                    helpSupportSection === key ? "bg-[#5A5A40] text-white" : "bg-white/5"
+                  )}
+                >
+                  {label}
+                </button>
+              ))}
+            </div>
+
+            {(helpSupportSection === 'clinics' || helpSupportSection === 'legal_aid' || helpSupportSection === 'shelters') && (
+              <select value={clinicServiceFilter} onChange={(e) => setClinicServiceFilter(e.target.value as 'all' | 'clinic' | 'legal_aid' | 'shelter' | 'resource_center' | 'lawyer')} className="px-3 py-2 bg-white/5 border border-white/10 rounded-xl text-sm">
+                <option value="all">All help services</option>
+                <option value="clinic">Clinics</option>
+                <option value="legal_aid">Legal aid</option>
+                <option value="lawyer">Lawyers</option>
+                <option value="shelter">Shelters</option>
+                <option value="resource_center">Resource centers</option>
+              </select>
+            )}
+
+            {helpSupportSection === 'translators' && (
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-2">
+                <input value={translatorLanguageNeeded} onChange={(e) => setTranslatorLanguageNeeded(e.target.value)} placeholder="Language needed (e.g., Farsi, French)" className="px-3 py-2 bg-white/5 border border-white/10 rounded-xl text-sm" />
+                <select value={translatorServiceType} onChange={(e) => setTranslatorServiceType(e.target.value as 'translator' | 'interpreter' | 'both')} className="px-3 py-2 bg-white/5 border border-white/10 rounded-xl text-sm">
+                  <option value="both">Translator + Interpreter</option>
+                  <option value="translator">Translator</option>
+                  <option value="interpreter">Interpreter</option>
+                </select>
+                <select value={translatorMode} onChange={(e) => setTranslatorMode(e.target.value as 'in_person' | 'remote' | 'phone' | 'any')} className="px-3 py-2 bg-white/5 border border-white/10 rounded-xl text-sm">
+                  <option value="any">Any mode</option>
+                  <option value="in_person">In person</option>
+                  <option value="remote">Remote</option>
+                  <option value="phone">Phone</option>
+                </select>
+                <select value={translatorSpecialization} onChange={(e) => setTranslatorSpecialization(e.target.value as 'medical' | 'legal' | 'education' | 'general')} className="px-3 py-2 bg-white/5 border border-white/10 rounded-xl text-sm">
+                  <option value="general">General specialization</option>
+                  <option value="medical">Medical</option>
+                  <option value="legal">Legal</option>
+                  <option value="education">Education</option>
+                </select>
+                <select value={translatorCost} onChange={(e) => setTranslatorCost(e.target.value as 'free' | 'paid' | 'any')} className="px-3 py-2 bg-white/5 border border-white/10 rounded-xl text-sm">
+                  <option value="any">Any cost</option>
+                  <option value="free">Free</option>
+                  <option value="paid">Paid</option>
+                </select>
+                <select value={translatorAvailability} onChange={(e) => setTranslatorAvailability(e.target.value as 'same_day' | 'weekends' | 'any')} className="px-3 py-2 bg-white/5 border border-white/10 rounded-xl text-sm">
+                  <option value="any">Any availability</option>
+                  <option value="same_day">Same day</option>
+                  <option value="weekends">Weekends</option>
+                </select>
+              </div>
+            )}
+
+            {helpSupportSection === 'newcomer_guides' && (
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-2">
+                <input value={newcomerLanguage} onChange={(e) => setNewcomerLanguage(e.target.value)} placeholder="Guide language (e.g., English, Farsi)" className="px-3 py-2 bg-white/5 border border-white/10 rounded-xl text-sm" />
+                <select value={newcomerTopic} onChange={(e) => setNewcomerTopic(e.target.value as any)} className="px-3 py-2 bg-white/5 border border-white/10 rounded-xl text-sm">
+                  <option value="all">All topics</option>
+                  <option value="documentation">Documentation</option>
+                  <option value="healthcare">Healthcare</option>
+                  <option value="housing">Housing</option>
+                  <option value="education">Education</option>
+                  <option value="employment">Employment</option>
+                  <option value="banking">Banking</option>
+                  <option value="transportation">Transportation</option>
+                  <option value="legal_rights_general">Legal rights (general)</option>
+                  <option value="emergency_services">Emergency services</option>
+                </select>
+                <select value={newcomerFormat} onChange={(e) => setNewcomerFormat(e.target.value as any)} className="px-3 py-2 bg-white/5 border border-white/10 rounded-xl text-sm">
+                  <option value="any">Any format</option>
+                  <option value="article">Article</option>
+                  <option value="pdf">PDF</option>
+                  <option value="video">Video</option>
+                  <option value="checklist">Checklist</option>
+                  <option value="local_program">Local program</option>
+                </select>
+              </div>
+            )}
           </div>
         )}
 
         {/* Advanced Filters */}
         <AnimatePresence>
-          {audienceFilter === 'student' && (
+          {(activeTab === 'events' || activeTab === 'volunteer' || activeTab === 'map_view') && audienceFilter === 'student' && (
             <motion.div 
               initial={{ height: 0, opacity: 0 }}
               animate={{ height: 'auto', opacity: 1 }}
@@ -1025,7 +2122,7 @@ export default function App() {
             </motion.div>
           )}
 
-          {audienceFilter === 'professional' && (
+          {(activeTab === 'events' || activeTab === 'volunteer' || activeTab === 'map_view') && audienceFilter === 'professional' && (
             <motion.div 
               initial={{ height: 0, opacity: 0 }}
               animate={{ height: 'auto', opacity: 1 }}
@@ -1095,6 +2192,33 @@ export default function App() {
                     </button>
                   ))}
                 </div>
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-3 mt-4">
+                  <input
+                    type="text"
+                    value={orgCulturalGroupFilter}
+                    onChange={(e) => setOrgCulturalGroupFilter(e.target.value)}
+                    placeholder={t(interfaceLanguage, 'cultural_placeholder')}
+                    className="px-3 py-2 bg-white/5 border border-white/10 rounded-xl text-sm"
+                  />
+                  <input
+                    type="text"
+                    value={orgLanguageFilter}
+                    onChange={(e) => setOrgLanguageFilter(e.target.value)}
+                    placeholder={t(interfaceLanguage, 'language_placeholder')}
+                    className="px-3 py-2 bg-white/5 border border-white/10 rounded-xl text-sm"
+                  />
+                </div>
+                <div className="flex flex-wrap gap-3 mt-3 text-xs">
+                  <label className="flex items-center gap-2"><input type="checkbox" checked={orgTranslationOnly} onChange={(e) => setOrgTranslationOnly(e.target.checked)} /> {t(interfaceLanguage, 'translation_services')}</label>
+                  <label className="flex items-center gap-2"><input type="checkbox" checked={orgImmigrantSupportOnly} onChange={(e) => setOrgImmigrantSupportOnly(e.target.checked)} /> {t(interfaceLanguage, 'immigration_support')}</label>
+                  <label className="flex items-center gap-2"><input type="checkbox" checked={orgNewcomerSupportOnly} onChange={(e) => setOrgNewcomerSupportOnly(e.target.checked)} /> {t(interfaceLanguage, 'newcomer_support')}</label>
+                </div>
+                {(orgCulturalGroupFilter || orgLanguageFilter) && displayedItemsWithArtists.length === 0 && !autoRescueLoading && (
+                  <p className="text-xs text-yellow-300 mt-3">{t(interfaceLanguage, 'no_exact_match')}</p>
+                )}
+                {autoRescueLoading && (
+                  <p className="text-xs text-emerald-300 mt-3">{t(interfaceLanguage, 'ai_fallback_running')}</p>
+                )}
               </div>
             </motion.div>
           )}
@@ -1109,7 +2233,7 @@ export default function App() {
                 title="Refresh results"
               >
                 <RefreshCw size={14} className={loading ? "animate-spin" : ""} />
-                Refresh
+                {t(interfaceLanguage, 'refresh')}
               </button>
             )}
             {summary && activeTab !== 'mylist' && (
@@ -1117,9 +2241,125 @@ export default function App() {
                 {summary}
               </p>
             )}
+            <p className="text-xs opacity-60 hidden lg:block">
+              map_debug: total {mapDebug.total_results} | with coords {mapDebug.results_with_coordinates} | markers {mapDebug.markers_displayed}
+            </p>
+            <p className="text-xs opacity-60 hidden xl:block">
+              layout_debug: sidebar {layoutDebug.sidebar_width_px}px | content {layoutDebug.content_width_px}px | gap {layoutDebug.horizontal_gap_px}px
+            </p>
+            {mapDebug.markers_displayed < mapDebug.results_with_coordinates && (
+              <p className="text-xs text-yellow-400">Map marker mismatch detected</p>
+            )}
           </div>
         </div>
       </div>
+      )}
+
+      {activeTab !== 'connections' && (
+        <div className="mb-6 grid grid-cols-1 xl:grid-cols-2 gap-4">
+          <div className="bg-white/5 border border-white/10 rounded-2xl p-4">
+            <div className="flex flex-wrap items-start justify-between gap-2 mb-3">
+              <h3 className="font-serif text-xl">{t(interfaceLanguage, 'community_videos')}</h3>
+              <div className="flex flex-wrap gap-2 max-w-full">
+                <select value={videoOrder} onChange={(e) => setVideoOrder(e.target.value as 'relevance' | 'date')} className="px-2 py-1 bg-white/5 border border-white/10 rounded-lg text-xs min-w-[120px]">
+                  <option value="relevance">Relevance</option>
+                  <option value="date">Upload Date</option>
+                </select>
+                <select value={videoDuration} onChange={(e) => setVideoDuration(e.target.value as 'any' | 'short' | 'medium' | 'long')} className="px-2 py-1 bg-white/5 border border-white/10 rounded-lg text-xs min-w-[120px]">
+                  <option value="any">{t(interfaceLanguage, 'any_length')}</option>
+                  <option value="short">Short</option>
+                  <option value="medium">Medium</option>
+                  <option value="long">Long</option>
+                </select>
+                <select value={videoChannelType} onChange={(e) => setVideoChannelType(e.target.value as 'all' | 'organization' | 'educational' | 'individual')} className="px-2 py-1 bg-white/5 border border-white/10 rounded-lg text-xs min-w-[130px]">
+                  <option value="all">{t(interfaceLanguage, 'all_channels')}</option>
+                  <option value="organization">Organization</option>
+                  <option value="educational">Educational</option>
+                  <option value="individual">Individual</option>
+                </select>
+              </div>
+            </div>
+            {videosLoading ? (
+              <p className="text-sm opacity-60">{t(interfaceLanguage, 'loading_videos')}</p>
+            ) : videos.length === 0 ? (
+              <p className="text-sm opacity-60">{t(interfaceLanguage, 'no_videos')}</p>
+            ) : (
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                {videos.slice(0, 4).map((video) => (
+                  <a key={video.video_id} href={video.watch_url} target="_blank" rel="noopener noreferrer" className="flex gap-3 p-2 rounded-xl bg-white/5 border border-white/10">
+                    <img src={video.thumbnail} alt={video.title} className="w-24 h-16 object-cover rounded-lg" />
+                    <div className="min-w-0">
+                      <p className="text-sm font-semibold line-clamp-2">{video.title}</p>
+                      <p className="text-xs opacity-60 truncate">{video.channel_name}</p>
+                    </div>
+                  </a>
+                ))}
+              </div>
+            )}
+          </div>
+          <div className="bg-white/5 border border-white/10 rounded-2xl p-4">
+            <h3 className="font-serif text-xl mb-3">{t(interfaceLanguage, 'local_artists')}</h3>
+            {artistsLoading ? (
+              <p className="text-sm opacity-60">{t(interfaceLanguage, 'loading_artists')}</p>
+            ) : artists.length === 0 ? (
+              <p className="text-sm opacity-60">{t(interfaceLanguage, 'no_artists')}</p>
+            ) : (
+              <div className="space-y-2">
+                {artists.slice(0, 4).map((artist, idx) => (
+                  <div key={`${artist.artist_name}-${idx}`} className="p-2 rounded-xl bg-white/5 border border-white/10">
+                    <p className="font-semibold">{artist.artist_name}</p>
+                    <p className="text-xs opacity-70">{artist.category.replace('_', ' ')} • {artist.location}</p>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
+      {activeTab === 'clinics_legal' && helpSupportSection === 'translators' && (
+        <div className="mb-6 bg-white/5 border border-white/10 rounded-2xl p-4">
+          <h3 className="font-serif text-2xl mb-3">Translators & Interpreters</h3>
+          {helpSupportLoading ? (
+            <p className="text-sm opacity-60">Loading translator listings...</p>
+          ) : translatorItems.length === 0 ? (
+            <p className="text-sm opacity-60">No local translator listings found. Expand radius or language filters.</p>
+          ) : (
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+              {translatorItems.slice(0, 12).map((tr, idx) => (
+                <div key={`${tr.name}-${idx}`} className="p-3 rounded-xl bg-white/5 border border-white/10">
+                  <p className="font-semibold">{tr.name}</p>
+                  <p className="text-xs opacity-70">{tr.service_type} • {(tr.languages_supported || []).join(', ') || 'English'}</p>
+                  <p className="text-xs opacity-70">{tr.mode} • {tr.cost}</p>
+                  <p className="text-xs opacity-60 mt-1">{tr.address || tr.service_area}</p>
+                  {tr.website && <a className="text-xs text-[#5A5A40] underline" href={tr.website} target="_blank" rel="noreferrer">Source</a>}
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+
+      {activeTab === 'clinics_legal' && helpSupportSection === 'newcomer_guides' && (
+        <div className="mb-6 bg-white/5 border border-white/10 rounded-2xl p-4">
+          <h3 className="font-serif text-2xl mb-3">Newcomer Guides</h3>
+          {helpSupportLoading ? (
+            <p className="text-sm opacity-60">Loading newcomer guides...</p>
+          ) : newcomerGuideItems.length === 0 ? (
+            <p className="text-sm opacity-60">No local newcomer guides found for current filters.</p>
+          ) : (
+            <div className="space-y-3">
+              {newcomerGuideItems.slice(0, 16).map((guide, idx) => (
+                <div key={`${guide.title}-${idx}`} className="p-3 rounded-xl bg-white/5 border border-white/10">
+                  <p className="font-semibold">{guide.title}</p>
+                  <p className="text-xs opacity-70">{guide.topic} • {guide.language} • {guide.format}</p>
+                  <p className="text-sm opacity-80 mt-1">{guide.summary}</p>
+                  {guide.source_url && <a className="text-xs text-[#5A5A40] underline" href={guide.source_url} target="_blank" rel="noreferrer">Source</a>}
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
       )}
 
       <main className="flex-1 relative min-h-[500px]">
@@ -1162,6 +2402,9 @@ export default function App() {
               messageDraft={messageDraft}
               setMessageDraft={setMessageDraft}
               onSendMessage={sendMessage}
+              communityPosts={communityPosts}
+              groups={groups}
+              onToggleGroupMembership={toggleGroupMembership}
             />
           ) : loading ? (
             <motion.div 
@@ -1196,7 +2439,7 @@ export default function App() {
               animate={{ opacity: 1, scale: 1 }}
               className="h-[600px] rounded-3xl overflow-hidden border border-white/10 shadow-2xl relative z-0"
             >
-              <MapComponent items={filteredItems} userLocation={location} />
+              <MapComponent items={displayedItemsWithArtists} userLocation={location} onViewportChange={setViewportBounds} />
             </motion.div>
           ) : viewMode === 'split' ? (
             <motion.div
@@ -1206,23 +2449,26 @@ export default function App() {
               className="grid grid-cols-1 xl:grid-cols-2 gap-6"
             >
               <div className="h-[520px] rounded-3xl overflow-hidden border border-white/10 shadow-2xl relative z-0">
-                <MapComponent items={filteredItems} userLocation={location} />
+                <MapComponent items={displayedItemsWithArtists} userLocation={location} onViewportChange={setViewportBounds} />
               </div>
               <div className="max-h-[520px] overflow-y-auto pr-1">
                 <div className="grid grid-cols-1 gap-4">
-                  {filteredItems.length === 0 ? (
+                  {displayedItemsWithArtists.length === 0 ? (
                     <div className="text-center py-16 border-2 border-dashed border-white/10 rounded-[28px]">
                       <Filter className="mx-auto opacity-20 mb-4" size={48} />
-                      <p className="opacity-40 text-base font-serif">No items found matching your filters.</p>
+                      <p className="opacity-40 text-base font-serif">{t(interfaceLanguage, 'no_items')}</p>
                     </div>
                   ) : (
-                    filteredItems.map((item) => (
+                    displayedItemsWithArtists.map((item) => (
                       <ResultCard
                         key={item.id}
                         item={item}
                         onToggle={() => toggleMyList(item)}
                         isSaved={isInList(item.id)}
                         onViewDetails={() => setSelectedItem(item)}
+                        attendanceCounts={attendance[item.id] || { interested: 0, going: 0 }}
+                        onInterested={() => incrementAttendance(item.id, 'interested')}
+                        onGoing={() => incrementAttendance(item.id, 'going')}
                       />
                     ))
                   )}
@@ -1236,19 +2482,22 @@ export default function App() {
               animate={{ opacity: 1, y: 0 }}
               className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6"
             >
-              {filteredItems.length === 0 ? (
+              {displayedItemsWithArtists.length === 0 ? (
                 <div className="col-span-full text-center py-32 border-2 border-dashed border-white/10 rounded-[40px]">
                   <Filter className="mx-auto opacity-20 mb-4" size={64} />
-                  <p className="opacity-40 text-lg font-serif">No items found matching your filters.</p>
+                  <p className="opacity-40 text-lg font-serif">{t(interfaceLanguage, 'no_items')}</p>
                 </div>
               ) : (
-                filteredItems.map((item) => (
+                displayedItemsWithArtists.map((item) => (
                   <ResultCard 
                     key={item.id} 
                     item={item} 
                     onToggle={() => toggleMyList(item)}
                     isSaved={isInList(item.id)}
                     onViewDetails={() => setSelectedItem(item)}
+                    attendanceCounts={attendance[item.id] || { interested: 0, going: 0 }}
+                    onInterested={() => incrementAttendance(item.id, 'interested')}
+                    onGoing={() => incrementAttendance(item.id, 'going')}
                   />
                 ))
               )}
@@ -1265,6 +2514,8 @@ export default function App() {
           <SettingsModal 
             appearance={appearance}
             setAppearance={setAppearance}
+            interfaceLanguage={interfaceLanguage}
+            setInterfaceLanguage={setInterfaceLanguage}
             accentPreset={accentPreset}
             setAccentPreset={setAccentPreset}
             accentCustomHex={accentCustomHex}
@@ -1281,6 +2532,51 @@ export default function App() {
           />
         )}
       </AnimatePresence>
+
+      <div className="fixed bottom-5 right-5 z-[130]">
+        {assistantOpen && (
+          <div className="mb-3 w-[340px] max-w-[90vw] h-[420px] bg-[var(--card-bg)] border border-[var(--border-color)] rounded-2xl shadow-2xl flex flex-col overflow-hidden">
+            <div className="px-4 py-3 border-b border-[var(--border-color)] flex items-center justify-between">
+              <p className="font-semibold">AI Assistant</p>
+              <button onClick={() => setAssistantOpen(false)} className="opacity-60 hover:opacity-100"><X size={16} /></button>
+            </div>
+            <div className="flex-1 overflow-y-auto p-3 space-y-2">
+              {assistantMessages.length === 0 ? (
+                <p className="text-sm opacity-60">Ask: "Find Farsi-speaking lawyers" or "Find volunteer events this week".</p>
+              ) : (
+                assistantMessages.map((m, idx) => (
+                  <div key={idx} className={cn("p-2 rounded-lg text-sm", m.role === 'user' ? "bg-white/10 ml-6" : "bg-[#5A5A40]/20 mr-6")}>
+                    <p>{m.text}</p>
+                    {m.suggestions?.length ? (
+                      <ul className="mt-2 text-xs opacity-80 list-disc list-inside">
+                        {m.suggestions.slice(0, 3).map((s: any, i: number) => <li key={i}>{s.title}</li>)}
+                      </ul>
+                    ) : null}
+                  </div>
+                ))
+              )}
+            </div>
+            <div className="p-3 border-t border-[var(--border-color)] flex gap-2">
+              <input
+                value={assistantDraft}
+                onChange={(e) => setAssistantDraft(e.target.value)}
+                onKeyDown={(e) => { if (e.key === 'Enter') sendAssistantQuery(); }}
+                className="flex-1 px-3 py-2 bg-white/5 border border-white/10 rounded-xl text-sm"
+                placeholder="Ask for events, resources, language help..."
+              />
+              <button onClick={sendAssistantQuery} className="px-3 py-2 rounded-xl bg-[#5A5A40] text-white text-sm">Send</button>
+            </div>
+          </div>
+        )}
+        <button
+          onClick={() => setAssistantOpen((v) => !v)}
+          className="w-14 h-14 rounded-full bg-[#5A5A40] text-white shadow-2xl flex items-center justify-center"
+          aria-label="Open AI assistant"
+          title="AI Assistant"
+        >
+          <Bot size={22} />
+        </button>
+      </div>
 
       <footer className="py-12 text-center opacity-30 text-xs border-t border-white/5 mt-20">
         <p>&copy; {new Date().getFullYear()} Gratitude. Rooted in Accessibility & Community.</p>
@@ -1324,6 +2620,9 @@ function ConnectionsPanel({
   messageDraft,
   setMessageDraft,
   onSendMessage,
+  communityPosts,
+  groups,
+  onToggleGroupMembership,
 }: {
   connections: ConnectionProfile[];
   loading: boolean;
@@ -1358,6 +2657,9 @@ function ConnectionsPanel({
   messageDraft: string;
   setMessageDraft: (value: string) => void;
   onSendMessage: () => void;
+  communityPosts: Array<{ id: string; title: string; body: string; category: 'General' | 'Help Needed' | 'Local News' | 'Events' | 'Free Items'; neighborhood?: string }>;
+  groups: Array<{ group_id: string; name: string; description: string; member_count: number; location: string; joined?: boolean }>;
+  onToggleGroupMembership: (groupId: string) => void;
 }) {
   const totalPages = Math.max(1, Math.ceil(total / pageSize));
 
@@ -1492,6 +2794,42 @@ function ConnectionsPanel({
           </button>
         </div>
       </div>
+
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+        <div className="bg-white/5 border border-white/10 rounded-2xl p-5">
+          <h3 className="font-serif text-2xl mb-3">Community Posts</h3>
+          <div className="space-y-3">
+            {communityPosts.map((post) => (
+              <div key={post.id} className="p-3 rounded-xl bg-white/5 border border-white/10">
+                <div className="flex items-center justify-between gap-3">
+                  <p className="font-semibold">{post.title}</p>
+                  <span className="text-[10px] uppercase px-2 py-1 rounded-full bg-white/10">{post.category}</span>
+                </div>
+                <p className="text-sm opacity-80 mt-2">{post.body}</p>
+                {post.neighborhood && <p className="text-xs opacity-60 mt-2">{post.neighborhood}</p>}
+              </div>
+            ))}
+          </div>
+        </div>
+
+        <div className="bg-white/5 border border-white/10 rounded-2xl p-5">
+          <h3 className="font-serif text-2xl mb-3">Community Groups</h3>
+          <div className="space-y-3">
+            {groups.map((group) => (
+              <div key={group.group_id} className="p-3 rounded-xl bg-white/5 border border-white/10 flex items-start justify-between gap-3">
+                <div>
+                  <p className="font-semibold">{group.name}</p>
+                  <p className="text-sm opacity-80">{group.description}</p>
+                  <p className="text-xs opacity-60 mt-1">{group.location} • {group.member_count} members</p>
+                </div>
+                <button onClick={() => onToggleGroupMembership(group.group_id)} className="px-3 py-1.5 rounded-lg bg-[#5A5A40] text-white text-xs">
+                  {group.joined ? 'Leave' : 'Join'}
+                </button>
+              </div>
+            ))}
+          </div>
+        </div>
+      </div>
     </div>
   );
 }
@@ -1514,13 +2852,15 @@ function SidebarItem({ active, onClick, icon, label }: { active: boolean, onClic
 }
 
 function SettingsModal({ 
-  appearance, setAppearance, accentPreset, setAccentPreset, accentCustomHex, setAccentCustomHex,
+  appearance, setAppearance, interfaceLanguage, setInterfaceLanguage, accentPreset, setAccentPreset, accentCustomHex, setAccentCustomHex,
   highContrast, setHighContrast, largeTextMode, setLargeTextMode, reducedMotion, setReducedMotion,
   screenReaderLabels, setScreenReaderLabels,
   onClose 
 }: { 
   appearance: Appearance,
   setAppearance: (t: Appearance) => void,
+  interfaceLanguage: string,
+  setInterfaceLanguage: (v: string) => void,
   accentPreset: AccentPreset,
   setAccentPreset: (p: AccentPreset) => void,
   accentCustomHex: string,
@@ -1580,6 +2920,27 @@ function SettingsModal({
                 <AccessibilityToggle active={reducedMotion} onClick={() => setReducedMotion(!reducedMotion)} label="Reduced Motion" />
                 <AccessibilityToggle active={screenReaderLabels} onClick={() => setScreenReaderLabels(!screenReaderLabels)} label="Screen Reader Labels" />
               </div>
+            </div>
+
+            <div>
+              <label className="text-[10px] uppercase tracking-widest font-bold opacity-30 mb-4 block">App Language</label>
+              <div className="grid grid-cols-2 gap-2">
+                {["English", "Spanish", "Farsi", "Arabic", "French", "Chinese"].map((lang) => (
+                  <button
+                    key={lang}
+                    onClick={() => setInterfaceLanguage(lang)}
+                    className={cn("p-3 rounded-2xl border border-white/10 text-sm", interfaceLanguage === lang && "bg-white/10 border-[#5A5A40]")}
+                  >
+                    {lang}
+                  </button>
+                ))}
+              </div>
+              <input
+                value={interfaceLanguage}
+                onChange={(e) => setInterfaceLanguage(e.target.value || "English")}
+                placeholder="Custom language"
+                className="mt-2 w-full px-3 py-2 bg-white/5 border border-white/10 rounded-xl text-sm"
+              />
             </div>
 
             <div>
@@ -1666,7 +3027,7 @@ function FilterButton({ active, onClick, icon, label }: { active: boolean, onCli
 
 function ThemeToggle({ current, onSelect }: { current: Appearance, onSelect: (t: Appearance) => void }) {
   return (
-    <div className="flex gap-1">
+    <div className="flex flex-wrap gap-1">
       <ThemeIcon active={current === 'system'} onClick={() => onSelect('system')} icon={<Settings size={18} />} label="System theme" />
       <ThemeIcon active={current === 'light'} onClick={() => onSelect('light')} icon={<Sun size={18} />} label="Light theme" />
       <ThemeIcon active={current === 'dark'} onClick={() => onSelect('dark')} icon={<Moon size={18} />} label="Dark theme" />
@@ -1689,9 +3050,26 @@ function ThemeIcon({ active, onClick, icon, label }: { active: boolean, onClick:
   );
 }
 
-function ResultCard({ item, onToggle, isSaved, onViewDetails }: { item: CommunityItem, onToggle: () => void, isSaved: boolean, onViewDetails: () => void }) {
+function ResultCard({
+  item,
+  onToggle,
+  isSaved,
+  onViewDetails,
+  attendanceCounts,
+  onInterested,
+  onGoing,
+}: {
+  item: CommunityItem,
+  onToggle: () => void,
+  isSaved: boolean,
+  onViewDetails: () => void,
+  attendanceCounts: { interested: number; going: number },
+  onInterested: () => void,
+  onGoing: () => void
+}) {
+  const uiLanguage = safeGetLocalStorage('gratitude_interface_language') || 'English';
   const title = item.title || item.name;
-  const location = item.location_name || item.address;
+  const location = item.location_name || item.address || 'Not listed';
   const date = formatEventDate(item.date_start, item.date_unknown);
   const distanceMiles = typeof item.distance_miles === 'number' ? item.distance_miles : Number(item.distance_miles);
   const hasDistance = Number.isFinite(distanceMiles);
@@ -1750,6 +3128,13 @@ function ResultCard({ item, onToggle, isSaved, onViewDetails }: { item: Communit
       </div>
       
       <p className="opacity-70 text-sm mb-6 leading-relaxed line-clamp-2 flex-1">{item.description}</p>
+      {(item.cultural_groups?.length || item.supported_languages?.length) && (
+        <div className="mb-4 text-[11px] opacity-70 space-y-1">
+          {item.cultural_groups?.length ? <p>Cultural groups: {item.cultural_groups.join(', ')}</p> : null}
+          {item.supported_languages?.length ? <p>Languages: {item.supported_languages.join(', ')}</p> : null}
+          {item.translation_services ? <p>Translation: {item.translation_languages?.join(', ') || 'Available'}</p> : null}
+        </div>
+      )}
       
       <div className="space-y-3 mb-8">
         <div className="flex items-center gap-3 text-xs opacity-50">
@@ -1771,13 +3156,13 @@ function ResultCard({ item, onToggle, isSaved, onViewDetails }: { item: Communit
         {hasDistance && (
           <div className="flex items-center gap-3 text-xs text-[#5A5A40] font-bold">
             <Navigation size={14} />
-            {distanceMiles.toFixed(1)} miles away
+            {distanceMiles.toFixed(1)} {t(uiLanguage, 'miles_away')}
           </div>
         )}
         {!hasDistance && (
           <div className="flex items-center gap-3 text-xs opacity-60">
             <Navigation size={14} />
-            Distance unavailable
+            {t(uiLanguage, 'distance_unavailable')}
           </div>
         )}
       </div>
@@ -1788,7 +3173,7 @@ function ResultCard({ item, onToggle, isSaved, onViewDetails }: { item: Communit
           className="flex-1 flex items-center justify-center gap-2 py-3 bg-[#5A5A40]/10 hover:bg-[#5A5A40]/20 rounded-2xl text-sm font-medium transition-all text-[#5A5A40]"
         >
           <Info size={14} />
-          Details
+          {t(uiLanguage, 'details')}
         </button>
         {item.source_url && (
           <a 
@@ -1801,13 +3186,25 @@ function ResultCard({ item, onToggle, isSaved, onViewDetails }: { item: Communit
           </a>
         )}
       </div>
+      {item.type === 'event' && (
+        <div className="mt-3 flex items-center gap-2 text-xs">
+          <button onClick={onInterested} className="px-2 py-1 rounded-lg bg-white/5 border border-white/10">Interested ({attendanceCounts.interested})</button>
+          <button onClick={onGoing} className="px-2 py-1 rounded-lg bg-white/5 border border-white/10">Going ({attendanceCounts.going})</button>
+        </div>
+      )}
+      <div className="mt-2 flex items-center gap-2 text-[10px] opacity-70">
+        {item.neighborhood && <span>{item.neighborhood}</span>}
+        {item.verified_source && <span className="px-2 py-1 rounded-full bg-emerald-500/10 text-emerald-400">Verified source</span>}
+        {!!item.recommended_by_users && <span>{item.recommended_by_users} user recommendations</span>}
+      </div>
     </motion.div>
   );
 }
 
 function DetailsModal({ item, onClose }: { item: CommunityItem, onClose: () => void }) {
+  const uiLanguage = safeGetLocalStorage('gratitude_interface_language') || 'English';
   const title = item.title || item.name;
-  const location = item.location_name || item.address;
+  const location = item.location_name || item.address || 'Not listed';
   const date = formatEventDate(item.date_start, item.date_unknown);
   const distanceMiles = typeof item.distance_miles === 'number' ? item.distance_miles : Number(item.distance_miles);
   const hasDistance = Number.isFinite(distanceMiles);
@@ -1881,7 +3278,7 @@ function DetailsModal({ item, onClose }: { item: CommunityItem, onClose: () => v
                 </div>
                 <div>
                   <p className="text-[10px] uppercase tracking-widest font-bold opacity-30 mb-1">Distance</p>
-                  <p className="text-lg opacity-80">{hasDistance ? `${distanceMiles.toFixed(1)} miles away` : 'Distance unavailable'}</p>
+                  <p className="text-lg opacity-80">{hasDistance ? `${distanceMiles.toFixed(1)} ${t(uiLanguage, 'miles_away')}` : t(uiLanguage, 'distance_unavailable')}</p>
                 </div>
               </div>
               <div className="flex items-start gap-4">
@@ -1959,7 +3356,16 @@ function DetailsModal({ item, onClose }: { item: CommunityItem, onClose: () => v
   );
 }
 
-function MapComponent({ items, userLocation }: { items: CommunityItem[], userLocation: Location | null }) {
+function MapComponent({
+  items,
+  userLocation,
+  onViewportChange,
+}: {
+  items: CommunityItem[],
+  userLocation: Location | null,
+  onViewportChange?: (bounds: { north: number; south: number; east: number; west: number }) => void
+}) {
+  const uiLanguage = safeGetLocalStorage('gratitude_interface_language') || 'English';
   const firstMappable = items.find((item) => (item.latitude ?? item.lat) != null && (item.longitude ?? item.lon) != null);
   const center: [number, number] = userLocation
     ? [userLocation.latitude, userLocation.longitude]
@@ -1974,13 +3380,17 @@ function MapComponent({ items, userLocation }: { items: CommunityItem[], userLoc
         attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
       />
       {userLocation && (
-        <Marker position={[userLocation.latitude, userLocation.longitude]}>
+        <Marker position={[userLocation.latitude, userLocation.longitude]} icon={UserLocationIcon}>
           <Popup>You are here</Popup>
         </Marker>
       )}
       {items.map((item) => {
-        const lat = item.latitude || item.lat;
-        const lon = item.longitude || item.lon;
+        const normalized = normalizeCoordinates(
+          item.latitude != null ? Number(item.latitude) : (item.lat != null ? Number(item.lat) : null),
+          item.longitude != null ? Number(item.longitude) : (item.lon != null ? Number(item.lon) : null)
+        );
+        const lat = normalized?.lat;
+        const lon = normalized?.lon;
         const distanceMiles = typeof item.distance_miles === 'number' ? item.distance_miles : Number(item.distance_miles);
         const hasDistance = Number.isFinite(distanceMiles);
         if (lat == null || lon == null) return null;
@@ -2010,14 +3420,21 @@ function MapComponent({ items, userLocation }: { items: CommunityItem[], userLoc
                 <p className="text-xs opacity-80 mb-4 line-clamp-2">{item.description}</p>
                 <div className="flex justify-between items-center border-t pt-3">
                   <span className="text-[10px] uppercase font-bold opacity-50">{item.audience}</span>
-                  <a 
-                    href={`https://www.google.com/maps/search/?api=1&query=${lat},${lon}`}
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    className="text-[#5A5A40] text-xs font-bold flex items-center gap-1"
-                  >
-                    Directions <ExternalLink size={10} />
-                  </a>
+                  <div className="flex items-center gap-2">
+                    {item.source_url && (
+                      <a href={item.source_url} target="_blank" rel="noopener noreferrer" className="text-[#5A5A40] text-[10px] font-bold">
+                        {t(uiLanguage, 'details')}
+                      </a>
+                    )}
+                    <a 
+                      href={`https://www.google.com/maps/search/?api=1&query=${lat},${lon}`}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="text-[#5A5A40] text-[10px] font-bold flex items-center gap-1"
+                    >
+                      Directions <ExternalLink size={10} />
+                    </a>
+                  </div>
                 </div>
               </div>
             </Popup>
@@ -2025,6 +3442,7 @@ function MapComponent({ items, userLocation }: { items: CommunityItem[], userLoc
         );
       })}
       <MapUpdater center={center} />
+      {onViewportChange && <MapViewportListener onViewportChange={onViewportChange} />}
     </MapContainer>
   );
 }
@@ -2034,5 +3452,28 @@ function MapUpdater({ center }: { center: [number, number] }) {
   useEffect(() => {
     map.setView(center, map.getZoom());
   }, [center, map]);
+  return null;
+}
+
+function MapViewportListener({ onViewportChange }: { onViewportChange: (bounds: { north: number; south: number; east: number; west: number }) => void }) {
+  const map = useMap();
+  useEffect(() => {
+    const sync = () => {
+      const b = map.getBounds();
+      onViewportChange({
+        north: b.getNorth(),
+        south: b.getSouth(),
+        east: b.getEast(),
+        west: b.getWest(),
+      });
+    };
+    sync();
+    map.on('moveend', sync);
+    map.on('zoomend', sync);
+    return () => {
+      map.off('moveend', sync);
+      map.off('zoomend', sync);
+    };
+  }, [map, onViewportChange]);
   return null;
 }

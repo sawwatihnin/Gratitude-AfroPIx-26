@@ -22,6 +22,33 @@ export interface CommunityItem {
   source_name?: string;
   source_url?: string;
   retrieved_at?: string;
+  location_confidence?: 'high' | 'medium' | 'low';
+  neighborhood?: string;
+  verified_source?: boolean;
+  recommended_by_users?: number;
+  event_attendance?: {
+    interested_count: number;
+    going_count: number;
+  };
+  cultural_groups?: string[];
+  supported_languages?: string[];
+  translation_services?: boolean;
+  translation_languages?: string[];
+  immigrant_support?: boolean;
+  newcomer_support?: boolean;
+  primary_category?: 'event' | 'volunteer' | 'food_assistance' | 'organization' | 'clinic_legal' | 'cultural' | 'language_support' | 'artist' | 'education' | 'networking' | 'social' | 'resource' | 'other';
+  subcategory?: string;
+  ai_tags?: string[];
+  relevance_score?: number;
+  quality_score?: number;
+  classification_confidence?: 'high' | 'medium' | 'low';
+  low_relevance?: boolean;
+  low_quality?: boolean;
+  source_category?: string;
+  duplicate_of?: string | null;
+  user_reports?: number;
+  report_types?: string[];
+  classification_checked_at?: string;
   confidence?: {
     overall: 'high' | 'medium' | 'low';
     date: string;
@@ -80,4 +107,71 @@ export interface DirectMessage {
   timestamp: string;
   message_text: string;
   read_status: boolean;
+}
+
+export interface CommunityVideo {
+  video_id: string;
+  title: string;
+  channel_name: string;
+  channel_type?: 'organization' | 'educational' | 'individual';
+  published_date: string | null;
+  duration: string;
+  duration_minutes?: number;
+  thumbnail: string;
+  description: string;
+  watch_url: string;
+  embed_url: string;
+  local_relevance: 'high' | 'medium' | 'low';
+}
+
+export interface LocalArtist {
+  artist_name: string;
+  category: 'music' | 'visual_art' | 'performance' | 'digital' | 'other';
+  style: string;
+  location: string;
+  distance_miles: number | null;
+  description: string;
+  website: string;
+  social_links: string[];
+  upcoming_events: string[];
+  lat: number | null;
+  lon: number | null;
+  confidence: {
+    overall: 'high' | 'medium' | 'low';
+  };
+}
+
+export interface TranslatorEntity {
+  name: string;
+  service_type: 'translator' | 'interpreter' | 'both';
+  languages_supported: string[];
+  specializations: Array<'medical' | 'legal' | 'education' | 'general'>;
+  mode: 'in_person' | 'remote' | 'phone' | 'any';
+  cost: 'free' | 'paid' | 'any';
+  service_area: string;
+  address: string;
+  lat: number | null;
+  lon: number | null;
+  phone: string;
+  email: string;
+  website: string;
+  hours: string;
+  notes: string;
+  source_name: string;
+  source_url: string;
+  retrieved_at: string;
+  confidence: { overall: 'high' | 'medium' | 'low' };
+}
+
+export interface NewcomerGuide {
+  title: string;
+  topic: 'documentation' | 'healthcare' | 'housing' | 'education' | 'employment' | 'banking' | 'transportation' | 'legal_rights_general' | 'emergency_services';
+  language: string;
+  format: 'article' | 'pdf' | 'video' | 'checklist' | 'local_program';
+  summary: string;
+  source_name: string;
+  source_url: string;
+  retrieved_at: string;
+  local_relevance: 'high' | 'medium' | 'low';
+  confidence: { overall: 'high' | 'medium' | 'low' };
 }

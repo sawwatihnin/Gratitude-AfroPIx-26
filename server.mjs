@@ -269,6 +269,10 @@ db.exec(`
     confidence_location TEXT,
     confidence_type TEXT,
     retrieved_at TEXT,
+    location_confidence TEXT,
+    neighborhood TEXT,
+    verified_source INTEGER,
+    recommended_by_users INTEGER,
     needs_review INTEGER,
     category TEXT,
     phone TEXT,
@@ -281,6 +285,19 @@ db.exec(`
     industry TEXT,
     seniorityLevel TEXT,
     networkingVsTraining TEXT,
+    primary_category TEXT,
+    subcategory TEXT,
+    ai_tags TEXT,
+    relevance_score INTEGER,
+    quality_score INTEGER,
+    classification_confidence TEXT,
+    low_relevance INTEGER,
+    low_quality INTEGER,
+    source_category TEXT,
+    duplicate_of TEXT,
+    user_reports INTEGER,
+    report_types TEXT,
+    classification_checked_at TEXT,
     last_updated DATETIME DEFAULT CURRENT_TIMESTAMP
   );
 
@@ -296,13 +313,124 @@ db.exec(`
     lon REAL,
     last_updated DATETIME DEFAULT CURRENT_TIMESTAMP
   );
+
+  CREATE TABLE IF NOT EXISTS translator_entities (
+    id TEXT PRIMARY KEY,
+    name TEXT,
+    service_type TEXT,
+    languages_supported TEXT,
+    specializations TEXT,
+    mode TEXT,
+    cost TEXT,
+    service_area TEXT,
+    address TEXT,
+    lat REAL,
+    lon REAL,
+    phone TEXT,
+    email TEXT,
+    website TEXT,
+    hours TEXT,
+    notes TEXT,
+    source_name TEXT,
+    source_url TEXT,
+    retrieved_at TEXT,
+    confidence_overall TEXT,
+    last_updated DATETIME DEFAULT CURRENT_TIMESTAMP
+  );
+
+  CREATE TABLE IF NOT EXISTS newcomer_guides (
+    id TEXT PRIMARY KEY,
+    title TEXT,
+    topic TEXT,
+    language TEXT,
+    format TEXT,
+    summary TEXT,
+    source_name TEXT,
+    source_url TEXT,
+    retrieved_at TEXT,
+    local_relevance TEXT,
+    confidence_overall TEXT,
+    last_updated DATETIME DEFAULT CURRENT_TIMESTAMP
+  );
 `);
 try {
   db.prepare("ALTER TABLE community_items ADD COLUMN retrieved_at TEXT").run();
 } catch {}
+try {
+  db.prepare("ALTER TABLE community_items ADD COLUMN location_confidence TEXT").run();
+} catch {}
+try {
+  db.prepare("ALTER TABLE community_items ADD COLUMN neighborhood TEXT").run();
+} catch {}
+try {
+  db.prepare("ALTER TABLE community_items ADD COLUMN verified_source INTEGER").run();
+} catch {}
+try {
+  db.prepare("ALTER TABLE community_items ADD COLUMN recommended_by_users INTEGER").run();
+} catch {}
+try {
+  db.prepare("ALTER TABLE community_items ADD COLUMN primary_category TEXT").run();
+} catch {}
+try {
+  db.prepare("ALTER TABLE community_items ADD COLUMN subcategory TEXT").run();
+} catch {}
+try {
+  db.prepare("ALTER TABLE community_items ADD COLUMN ai_tags TEXT").run();
+} catch {}
+try {
+  db.prepare("ALTER TABLE community_items ADD COLUMN relevance_score INTEGER").run();
+} catch {}
+try {
+  db.prepare("ALTER TABLE community_items ADD COLUMN quality_score INTEGER").run();
+} catch {}
+try {
+  db.prepare("ALTER TABLE community_items ADD COLUMN classification_confidence TEXT").run();
+} catch {}
+try {
+  db.prepare("ALTER TABLE community_items ADD COLUMN low_relevance INTEGER").run();
+} catch {}
+try {
+  db.prepare("ALTER TABLE community_items ADD COLUMN low_quality INTEGER").run();
+} catch {}
+try {
+  db.prepare("ALTER TABLE community_items ADD COLUMN source_category TEXT").run();
+} catch {}
+try {
+  db.prepare("ALTER TABLE community_items ADD COLUMN duplicate_of TEXT").run();
+} catch {}
+try {
+  db.prepare("ALTER TABLE community_items ADD COLUMN user_reports INTEGER").run();
+} catch {}
+try {
+  db.prepare("ALTER TABLE community_items ADD COLUMN report_types TEXT").run();
+} catch {}
+try {
+  db.prepare("ALTER TABLE community_items ADD COLUMN classification_checked_at TEXT").run();
+} catch {}
 
 function normalizeText(value) {
   return (value || "").replace(/\s+/g, " ").trim();
+}
+
+function isValidCoordinate(lat, lon) {
+  if (lat == null || lon == null) return false;
+  const nLat = Number(lat);
+  const nLon = Number(lon);
+  if (!Number.isFinite(nLat) || !Number.isFinite(nLon)) return false;
+  if (nLat === 0 && nLon === 0) return false;
+  return nLat >= -90 && nLat <= 90 && nLon >= -180 && nLon <= 180;
+}
+
+function normalizeCoordinates(lat, lon) {
+  if (isValidCoordinate(lat, lon)) return { lat: Number(lat), lon: Number(lon) };
+  if (lat != null && lon != null) {
+    const swappedLat = Number(lon);
+    const swappedLon = Number(lat);
+    if (isValidCoordinate(swappedLat, swappedLon)) {
+      return { lat: swappedLat, lon: swappedLon };
+    }
+  }
+  return null;
 }
 
 function calculateDistanceMiles(lat1, lon1, lat2, lon2) {
@@ -341,8 +469,9 @@ async function geocodeQuery(query) {
   if (geocodeCache.has(q)) return geocodeCache.get(q);
 
   const cached = db.prepare("SELECT lat, lon FROM geocode_cache WHERE query = ?").get(q);
-  if (cached?.lat != null && cached?.lon != null) {
-    const result = { lat: Number(cached.lat), lon: Number(cached.lon), confidence: "medium" };
+  const normalizedCached = normalizeCoordinates(cached?.lat, cached?.lon);
+  if (normalizedCached) {
+    const result = { lat: normalizedCached.lat, lon: normalizedCached.lon, confidence: "medium" };
     geocodeCache.set(q, result);
     return result;
   }
@@ -361,7 +490,9 @@ async function geocodeQuery(query) {
     const results = await response.json();
     const first = Array.isArray(results) ? results[0] : null;
     if (!first?.lat || !first?.lon) return null;
-    const parsed = { lat: Number(first.lat), lon: Number(first.lon), confidence: "low" };
+    const normalized = normalizeCoordinates(first.lat, first.lon);
+    if (!normalized) return null;
+    const parsed = { lat: normalized.lat, lon: normalized.lon, confidence: "medium" };
     geocodeCache.set(q, parsed);
     db.prepare(
       "INSERT OR REPLACE INTO geocode_cache (query, lat, lon, last_updated) VALUES (?, ?, ?, CURRENT_TIMESTAMP)"
@@ -383,6 +514,61 @@ function decodeHtml(value) {
       .replace(/&quot;/g, '"')
       .replace(/&#39;/g, "'")
   );
+}
+
+function cleanListingText(value) {
+  return normalizeText(
+    String(value || "")
+      .replace(/<[^>]*>/g, " ")
+      .replace(/&nbsp;/g, " ")
+      .replace(/&amp;/g, "&")
+      .replace(/&lt;/g, "<")
+      .replace(/&gt;/g, ">")
+      .replace(/&quot;/g, '"')
+      .replace(/&#39;/g, "'")
+      .replace(/[\u0000-\u001F\u007F]/g, " ")
+  );
+}
+
+async function aiRepairListings(items) {
+  const apiKey = process.env.OPENAI_API_KEY;
+  if (!apiKey || !Array.isArray(items) || items.length === 0) {
+    return [];
+  }
+
+  const compact = items.slice(0, 60).map((item, index) => ({
+    index,
+    id: item.id || "",
+    title: cleanListingText(item.title || item.name || ""),
+    location_name: cleanListingText(item.location_name || ""),
+    address: cleanListingText(item.address || ""),
+    description: cleanListingText(item.description || ""),
+  }));
+
+  const openai = new OpenAI({ apiKey });
+  try {
+    const completion = await openai.chat.completions.create({
+      model: "gpt-4o-mini",
+      messages: [
+        {
+          role: "system",
+          content:
+            "You normalize community listing text. Do not invent facts. Only clean formatting, remove HTML artifacts, and fix obvious broken address punctuation. Return JSON object: {\"repairs\":[{\"index\":number,\"location_name\":string,\"address\":string,\"description\":string}]}.",
+        },
+        {
+          role: "user",
+          content: JSON.stringify({ listings: compact }),
+        },
+      ],
+      temperature: 0.1,
+    });
+    const content = completion.choices?.[0]?.message?.content || "{}";
+    const normalized = content.replace(/```json|```/gi, "").trim();
+    const parsed = JSON.parse(normalized || "{}");
+    return Array.isArray(parsed?.repairs) ? parsed.repairs : [];
+  } catch {
+    return [];
+  }
 }
 
 function tagValue(block, tagNames) {
@@ -428,14 +614,17 @@ function normalizeDate(raw) {
 
 function inferType(text) {
   const t = text.toLowerCase();
+  if (/(medical school|school of medicine|application|admission|admissions|enrollment|course registration)/.test(t)) {
+    return "event";
+  }
   if (/(volunteer|volunteering|serve|community service)/.test(t)) return "volunteer";
-  if (/(food bank|food pantry|meal distribution|food assistance)/.test(t)) return "foodbank";
+  if (/(food bank|food pantry|pantry|meal distribution|soup kitchen|food assistance|grocery support)/.test(t)) return "foodbank";
   if (/(donation|donate|fundraiser|drive)/.test(t)) return "donation";
   if (/(workshop|bootcamp|training)/.test(t)) return "workshop";
   if (/(class|course|lecture|seminar)/.test(t)) return "class";
   if (/(networking|career fair|meetup|professional)/.test(t)) return "networking";
   if (/(support group|peer support)/.test(t)) return "support_group";
-  if (/(clinic|health screening|medical)/.test(t)) return "clinic";
+  if (/(free clinic|community clinic|health clinic|health screening|medical aid|urgent care)/.test(t)) return "clinic";
   if (/(legal aid|pro bono|legal clinic|law center)/.test(t)) return "legal_aid";
   if (/(shelter|housing support|homeless)/.test(t)) return "shelter";
   if (/(resource center|community center|service center)/.test(t)) return "resource_center";
@@ -453,13 +642,333 @@ function inferAudience(text) {
 
 function inferOrgCategory(text) {
   const t = text.toLowerCase();
+  if (/(medical school|school of medicine|application|admission|admissions|enrollment)/.test(t)) return "other";
   if (/(shelter|housing support|homeless)/.test(t)) return "shelter";
   if (/(legal aid|pro bono|legal clinic)/.test(t)) return "legal_aid";
-  if (/(clinic|health center|medical)/.test(t)) return "free_clinic";
+  if (/(free clinic|health clinic|community clinic|health center|medical aid)/.test(t)) return "free_clinic";
   if (/(law office|attorney|lawyer)/.test(t)) return "lawyer";
-  if (/(food pantry|food assistance|meal)/.test(t)) return "food_assistance";
+  if (/(food pantry|pantry|food assistance|meal|soup kitchen|grocery support)/.test(t)) return "food_assistance";
   if (/(resource center|community center|support services|crisis|immigration|domestic violence)/.test(t)) return "resource_center";
   return "other";
+}
+
+function inferSupportedLanguages(text) {
+  const t = text.toLowerCase();
+  const known = [
+    "english","spanish","farsi","persian","arabic","turkish","chinese","hindi","urdu","korean","japanese","vietnamese","french","german","russian","pashto"
+  ];
+  const out = [];
+  for (const lang of known) {
+    if (t.includes(lang)) out.push(lang === "persian" ? "Farsi" : lang.charAt(0).toUpperCase() + lang.slice(1));
+  }
+  return [...new Set(out)];
+}
+
+function inferCulturalGroups(text) {
+  const t = text.toLowerCase();
+  const patterns = [
+    "iranian","persian","arab","turkish","hispanic","latino","african","asian","european","south asian","east asian","middle eastern","indian","pakistani","kurdish","chinese","korean","japanese","vietnamese"
+  ];
+  const out = [];
+  for (const p of patterns) {
+    if (t.includes(p)) out.push(p.split(" ").map((s) => s.charAt(0).toUpperCase() + s.slice(1)).join(" "));
+  }
+  return [...new Set(out)];
+}
+
+function inferTranslatorServiceType(text) {
+  const t = text.toLowerCase();
+  const hasTranslator = /translator|translation/.test(t);
+  const hasInterpreter = /interpreter|interpretation/.test(t);
+  if (hasTranslator && hasInterpreter) return "both";
+  if (hasInterpreter) return "interpreter";
+  return "translator";
+}
+
+function inferTranslatorMode(text) {
+  const t = text.toLowerCase();
+  if (/(phone|hotline|call)/.test(t)) return "phone";
+  if (/(remote|virtual|online|zoom)/.test(t)) return "remote";
+  if (/(in person|onsite|on-site|walk-in)/.test(t)) return "in_person";
+  return "any";
+}
+
+function inferTranslatorCost(text) {
+  const t = text.toLowerCase();
+  if (/(free|no cost|complimentary)/.test(t)) return "free";
+  if (/(fee|paid|cost|rate)/.test(t)) return "paid";
+  return "any";
+}
+
+function inferTranslatorSpecializations(text) {
+  const t = text.toLowerCase();
+  const out = [];
+  if (/(medical|clinic|health|hospital)/.test(t)) out.push("medical");
+  if (/(legal|law|court|attorney)/.test(t)) out.push("legal");
+  if (/(school|education|esl|student)/.test(t)) out.push("education");
+  if (out.length === 0) out.push("general");
+  return out;
+}
+
+function inferGuideTopic(text) {
+  const t = text.toLowerCase();
+  if (/(id|license|documentation|documents|visa|immigration)/.test(t)) return "documentation";
+  if (/(health|clinic|medical|insurance)/.test(t)) return "healthcare";
+  if (/(housing|shelter|rent|landlord)/.test(t)) return "housing";
+  if (/(school|education|esl|enroll)/.test(t)) return "education";
+  if (/(job|employment|resume|interview)/.test(t)) return "employment";
+  if (/(bank|account|finance)/.test(t)) return "banking";
+  if (/(bus|train|transport|transit|driver)/.test(t)) return "transportation";
+  if (/(rights|know your rights|legal)/.test(t)) return "legal_rights_general";
+  return "emergency_services";
+}
+
+function inferGuideFormat(item) {
+  const url = String(item.source_url || "").toLowerCase();
+  const text = `${item.title || ""} ${item.description || ""}`.toLowerCase();
+  if (url.endsWith(".pdf")) return "pdf";
+  if (/youtube|vimeo|video|webinar/.test(url + " " + text)) return "video";
+  if (/checklist|steps|how to/.test(text)) return "checklist";
+  if (/program|service|center/.test(text)) return "local_program";
+  return "article";
+}
+
+function mapItemsToTranslators(items = [], location = null, radiusMiles = 25, limit = 120) {
+  const out = [];
+  const seen = new Set();
+  for (const item of items) {
+    const text = `${item.title || ""} ${item.description || ""} ${item.type || ""} ${item.category || ""}`.toLowerCase();
+    if (!/(translator|translation|interpreter|interpretation|language assistance|bilingual|multilingual)/.test(text)) continue;
+    const key = `${normalizeText(item.title || item.name || "").toLowerCase()}|${normalizeText(item.address || item.location_name || "").toLowerCase()}`;
+    if (!key || seen.has(key)) continue;
+    seen.add(key);
+    const coords = normalizeCoordinates(item.lat ?? item.latitude, item.lon ?? item.longitude);
+    let dist = null;
+    if (location?.latitude != null && location?.longitude != null && coords) {
+      dist = calculateDistanceMiles(location.latitude, location.longitude, coords.lat, coords.lon);
+      if (dist > radiusMiles) continue;
+    }
+    const languages = inferSupportedLanguages(`${item.title || ""} ${item.description || ""}`);
+    out.push({
+      id: item.id || `translator-${out.length + 1}`,
+      name: normalizeText(item.title || item.name || item.organizer || "Language Support"),
+      service_type: inferTranslatorServiceType(text),
+      languages_supported: languages.length ? languages : ["English"],
+      specializations: inferTranslatorSpecializations(text),
+      mode: inferTranslatorMode(text),
+      cost: inferTranslatorCost(text),
+      service_area: normalizeText(item.location_name || item.address || "Local"),
+      address: normalizeText(item.address || item.location_name || "Not listed"),
+      lat: coords?.lat ?? null,
+      lon: coords?.lon ?? null,
+      phone: normalizeText(item.phone || "Not listed"),
+      email: normalizeText(item.email || "Not listed"),
+      website: normalizeText(item.source_url || ""),
+      hours: normalizeText(item.hours || "Not listed"),
+      notes: normalizeText(item.description || "Not listed"),
+      source_name: normalizeText(item.source_name || "Unknown"),
+      source_url: normalizeText(item.source_url || ""),
+      retrieved_at: item.retrieved_at || new Date().toISOString(),
+      confidence: { overall: coords ? "medium" : "low" },
+    });
+    if (out.length >= limit) break;
+  }
+  return out;
+}
+
+function mapItemsToNewcomerGuides(items = [], limit = 120) {
+  const out = [];
+  const seen = new Set();
+  for (const item of items) {
+    const text = `${item.title || ""} ${item.description || ""} ${item.type || ""} ${item.category || ""}`.toLowerCase();
+    if (!/(newcomer|immigrant|refugee|orientation|esl|translation|know your rights|driver|school enrollment|housing|healthcare)/.test(text)) continue;
+    const key = normalizeText(item.source_url || item.title || "").toLowerCase();
+    if (!key || seen.has(key)) continue;
+    seen.add(key);
+    const combined = `${item.title || ""} ${item.description || ""}`;
+    const langs = inferSupportedLanguages(combined);
+    out.push({
+      id: item.id || `guide-${out.length + 1}`,
+      title: normalizeText(item.title || "Newcomer Guide"),
+      topic: inferGuideTopic(combined),
+      language: langs[0] || "English",
+      format: inferGuideFormat(item),
+      summary: normalizeText(item.description || "Not listed"),
+      source_name: normalizeText(item.source_name || "Unknown"),
+      source_url: normalizeText(item.source_url || ""),
+      retrieved_at: item.retrieved_at || new Date().toISOString(),
+      local_relevance: /(chapel hill|durham|raleigh|north carolina|triangle)/i.test(combined) ? "high" : "medium",
+      confidence: { overall: "medium" },
+    });
+    if (out.length >= limit) break;
+  }
+  return out;
+}
+
+function parseIso8601DurationToMinutes(iso) {
+  if (!iso || typeof iso !== "string") return 0;
+  const match = iso.match(/PT(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?/i);
+  if (!match) return 0;
+  const hours = Number(match[1] || 0);
+  const minutes = Number(match[2] || 0);
+  const seconds = Number(match[3] || 0);
+  return hours * 60 + minutes + Math.ceil(seconds / 60);
+}
+
+function classifyChannelType(name, description = "") {
+  const t = `${name} ${description}`.toLowerCase();
+  if (/(official|org|nonprofit|foundation|city|county|department|university|college|library)/.test(t)) return "organization";
+  if (/(academy|tutorial|school|education|learning|course)/.test(t)) return "educational";
+  return "individual";
+}
+
+function discoverArtistsFromDb(query = "", location = null, radiusMiles = 25, limit = 100) {
+  const q = normalizeText(query).toLowerCase();
+  const rows = db.prepare("SELECT * FROM community_items").all();
+  const candidates = rows.filter((row) => {
+    const text = `${row.title || ""} ${row.description || ""} ${row.tags_raw || ""} ${row.organizer || ""}`.toLowerCase();
+    const looksLikeArtist = /(artist|band|musician|dj|photographer|painter|gallery|theater|performance|creator|digital art)/.test(text);
+    if (!looksLikeArtist) return false;
+    if (!q) return true;
+    return text.includes(q) || String(row.title || "").toLowerCase().includes(q);
+  });
+
+  const dedupe = new Set();
+  const out = [];
+  for (const row of candidates) {
+    const key = normalizeText(row.title || row.organizer || "").toLowerCase();
+    if (!key || dedupe.has(key)) continue;
+    dedupe.add(key);
+    const coords = normalizeCoordinates(row.latitude ?? row.lat, row.longitude ?? row.lon);
+    let dist = null;
+    if (location?.latitude != null && location?.longitude != null && coords) {
+      dist = calculateDistanceMiles(location.latitude, location.longitude, coords.lat, coords.lon);
+      if (dist > radiusMiles) continue;
+    }
+    const text = `${row.title || ""} ${row.description || ""}`.toLowerCase();
+    const category = /music|band|musician|dj/.test(text)
+      ? "music"
+      : /painter|gallery|photographer|visual/.test(text)
+        ? "visual_art"
+        : /performance|theater|dance/.test(text)
+          ? "performance"
+          : /digital|3d|animation/.test(text)
+            ? "digital"
+            : "other";
+    out.push({
+      artist_name: row.title || row.organizer || "Local Artist",
+      category,
+      style: row.category || "Community",
+      location: row.location_name || row.address || "Not listed",
+      distance_miles: dist != null ? Number(dist.toFixed(1)) : null,
+      description: row.description || "Not listed",
+      website: row.source_url || "",
+      social_links: [],
+      upcoming_events: [],
+      lat: coords?.lat ?? null,
+      lon: coords?.lon ?? null,
+      confidence: { overall: coords ? "medium" : "low" },
+    });
+    if (out.length >= limit) break;
+  }
+  return out;
+}
+
+function mapItemsToArtists(items = [], location = null, radiusMiles = 25, limit = 100) {
+  const out = [];
+  const seen = new Set();
+  for (const item of items) {
+    const title = normalizeText(item.title || item.name || item.organizer || "");
+    const description = normalizeText(item.description || "");
+    const text = `${title} ${description} ${item.type || ""} ${item.category || ""}`.toLowerCase();
+    const looksLikeArtist = /(artist|musician|band|dj|painter|photographer|gallery|performance|performer|creator|digital art|visual art|singer)/.test(text);
+    if (!looksLikeArtist) continue;
+
+    const key = `${title.toLowerCase()}|${normalizeText(item.location_name || item.address).toLowerCase()}`;
+    if (!title || seen.has(key)) continue;
+    seen.add(key);
+
+    const coords = normalizeCoordinates(item.lat ?? item.latitude, item.lon ?? item.longitude);
+    let dist = null;
+    if (location?.latitude != null && location?.longitude != null && coords) {
+      dist = calculateDistanceMiles(location.latitude, location.longitude, coords.lat, coords.lon);
+      if (dist > radiusMiles) continue;
+    }
+
+    const category = /music|band|musician|dj|singer/.test(text)
+      ? "music"
+      : /painter|gallery|photographer|visual/.test(text)
+        ? "visual_art"
+        : /performance|theater|dance/.test(text)
+          ? "performance"
+          : /digital|3d|animation|designer/.test(text)
+            ? "digital"
+            : "other";
+
+    out.push({
+      artist_name: title,
+      category,
+      style: normalizeText(item.category || item.type || "Community"),
+      location: normalizeText(item.location_name || item.address || "Not listed"),
+      distance_miles: dist != null ? Number(dist.toFixed(1)) : null,
+      description: description || "Not listed",
+      website: normalizeText(item.source_url || ""),
+      social_links: [],
+      upcoming_events: [],
+      lat: coords?.lat ?? null,
+      lon: coords?.lon ?? null,
+      confidence: { overall: coords ? "medium" : "low" },
+    });
+
+    if (out.length >= limit) break;
+  }
+  return out;
+}
+
+function normalizeBackboardResults(payload) {
+  const rows = payload?.results || payload?.items || payload?.data || [];
+  if (!Array.isArray(rows)) return [];
+  return rows.map((row, idx) => {
+    const title = row.title || row.name || row.event_name || row.organization_name || `Backboard Item ${idx + 1}`;
+    const description = normalizeText(row.description || row.summary || "");
+    const address = normalizeText(row.address || row.location || row.venue_address || "");
+    const locationName = normalizeText(row.location_name || row.venue || row.place || "");
+    const coords = normalizeCoordinates(row.lat ?? row.latitude, row.lon ?? row.longitude);
+    return {
+      id: canonicalUrl(row.source_url || row.url || "") || `backboard-${idx}-${title.toLowerCase().replace(/\s+/g, "-")}`,
+      title,
+      type: inferType(`${title} ${description}`),
+      audience: inferAudience(`${title} ${description}`),
+      date_start: normalizeDate(row.date_start || row.start_date || row.start || row.datetime || ""),
+      date_end: normalizeDate(row.date_end || row.end_date || row.end || ""),
+      date_unknown: !(row.date_start || row.start_date || row.start || row.datetime),
+      location_name: locationName || "Not listed",
+      address: address || "Not listed",
+      lat: coords?.lat ?? null,
+      lon: coords?.lon ?? null,
+      location_confidence: coords ? "high" : (address ? "medium" : "low"),
+      distance_miles: null,
+      organizer: row.organizer || row.host || "Not listed",
+      description: description || "Not listed",
+      accessibility_notes: "Not listed",
+      source_name: row.source_name || "Backboard",
+      source_url: canonicalUrl(row.source_url || row.url || ""),
+      retrieved_at: new Date().toISOString(),
+      confidence: {
+        overall: "medium",
+        date: "medium",
+        location: coords ? "high" : "medium",
+        type: "medium",
+      },
+      needs_review: false,
+      cultural_groups: Array.isArray(row.cultural_groups) ? row.cultural_groups : [],
+      supported_languages: Array.isArray(row.supported_languages) ? row.supported_languages : [],
+      translation_services: Boolean(row.translation_services),
+      translation_languages: Array.isArray(row.translation_languages) ? row.translation_languages : [],
+      immigrant_support: Boolean(row.immigrant_support),
+      newcomer_support: Boolean(row.newcomer_support),
+    };
+  });
 }
 
 function parseRssOrAtom(xml, sourceName, sourceUrl) {
@@ -479,6 +988,7 @@ function parseRssOrAtom(xml, sourceName, sourceUrl) {
     const combined = `${title} ${descriptionRaw} ${tagsRaw} ${organizer} ${sourceName}`;
     const type = inferType(combined);
     const audience = inferAudience(combined);
+    const locationConfidence = locationName ? "medium" : "low";
 
     return {
       id: sourceLink || `${sourceName}-${idx}`,
@@ -492,6 +1002,7 @@ function parseRssOrAtom(xml, sourceName, sourceUrl) {
       address: "Not listed",
       lat: null,
       lon: null,
+      location_confidence: locationConfidence,
       distance_miles: null,
       organizer: organizer || "Not listed",
       description: descriptionRaw || "Not listed",
@@ -535,6 +1046,7 @@ function parseIcs(text, sourceName, sourceUrl) {
     const combined = `${title} ${descriptionRaw} ${locationName} ${organizer}`;
     const type = inferType(combined);
     const audience = inferAudience(combined);
+    const locationConfidence = locationName ? "medium" : "low";
 
     return {
       id: link || `${sourceName}-ics-${idx}`,
@@ -548,6 +1060,7 @@ function parseIcs(text, sourceName, sourceUrl) {
       address: "Not listed",
       lat: null,
       lon: null,
+      location_confidence: locationConfidence,
       distance_miles: null,
       organizer: organizer || "Not listed",
       description: descriptionRaw || "Not listed",
@@ -587,6 +1100,243 @@ function dedupeItems(items) {
     out.push(item);
   }
   return out;
+}
+
+function tokenize(text) {
+  return normalizeText(String(text || ""))
+    .toLowerCase()
+    .split(/[^a-z0-9]+/)
+    .filter((t) => t.length > 2);
+}
+
+function jaccardSimilarity(a, b) {
+  const ta = new Set(tokenize(a));
+  const tb = new Set(tokenize(b));
+  if (ta.size === 0 && tb.size === 0) return 1;
+  let intersection = 0;
+  for (const t of ta) if (tb.has(t)) intersection += 1;
+  const union = new Set([...ta, ...tb]).size;
+  return union ? intersection / union : 0;
+}
+
+function inferPrimaryCategory(item) {
+  const text = `${item.title || ""} ${item.description || ""} ${item.type || ""} ${item.category || ""}`.toLowerCase();
+  if (/(spam|advertisement|limited time offer|coupon|buy now|promo code)/.test(text)) return "other";
+  if (/(artist|band|musician|gallery|performance|photographer|painter)/.test(text)) return "artist";
+  if (/(translation|language support|esl|interpretation)/.test(text)) return "language_support";
+  if (/(cultural|heritage|festival|community center|cultural center)/.test(text)) return "cultural";
+  if (/(clinic|legal aid|attorney|lawyer|pro bono|shelter|crisis support)/.test(text)) return "clinic_legal";
+  if (/(food bank|pantry|meal|donation|food assistance)/.test(text) || item.type === "foodbank" || item.type === "donation") return "food_assistance";
+  if (item.type === "volunteer" || /(volunteer|community service)/.test(text)) return "volunteer";
+  if (/(organization|nonprofit|association|resource center)/.test(text)) return "organization";
+  if (/(workshop|class|lecture|training|course)/.test(text)) return "education";
+  if (/(networking|career fair|professional meetup)/.test(text)) return "networking";
+  if (/(social|meetup|gathering)/.test(text)) return "social";
+  if (item.type && item.type !== "organization") return "event";
+  return "resource";
+}
+
+function inferSubcategory(item, primaryCategory) {
+  const text = `${item.title || ""} ${item.description || ""} ${item.type || ""} ${item.category || ""}`.toLowerCase();
+  if (primaryCategory === "clinic_legal") {
+    if (/(legal aid|pro bono|attorney|lawyer)/.test(text)) return "legal_aid";
+    if (/(shelter|housing support)/.test(text)) return "shelter";
+    return "clinic";
+  }
+  if (primaryCategory === "food_assistance") {
+    if (/(food pantry|food bank|pantry)/.test(text)) return "food_bank";
+    return "donation";
+  }
+  if (/(workshop)/.test(text)) return "workshop";
+  if (/(networking|career fair)/.test(text)) return "networking";
+  if (/(class|course|lecture|seminar)/.test(text)) return "class";
+  if (/(performance|concert|show)/.test(text)) return "performance";
+  if (/(festival|fair)/.test(text)) return "festival";
+  if (/(support group|peer support)/.test(text)) return "support_group";
+  return normalizeText(item.type || "event").toLowerCase().replace(/\s+/g, "_");
+}
+
+function inferAiTags(item) {
+  const text = `${item.title || ""} ${item.description || ""} ${item.type || ""} ${item.category || ""}`.toLowerCase();
+  const map = [
+    ["technology", /(tech|software|ai|data|coding)/],
+    ["volunteering", /(volunteer|service|community service)/],
+    ["free", /(free|no cost|complimentary)/],
+    ["workshop", /(workshop|training|bootcamp)/],
+    ["beginner", /(beginner|intro|101)/],
+    ["community", /(community|local|neighborhood)/],
+    ["cultural", /(cultural|heritage|international)/],
+    ["networking", /(networking|career fair|meetup)/],
+    ["food", /(food bank|pantry|meal|donation drive)/],
+    ["legal", /(legal aid|attorney|lawyer|pro bono)/],
+    ["health", /(clinic|health|medical)/],
+    ["language_support", /(translation|interpretation|esl|language support)/],
+  ];
+  return map.filter(([, rx]) => rx.test(text)).map(([tag]) => tag);
+}
+
+function computeRelevanceScore(item) {
+  const text = `${item.title || ""} ${item.description || ""}`.toLowerCase();
+  let score = 65;
+  if (item.source_url) score += 10;
+  if (item.address || item.location_name) score += 8;
+  if (item.date_start || item.date_end) score += 8;
+  if (/(spam|coupon|buy now|shop now|sale ends)/.test(text)) score -= 60;
+  if (/(online casino|forex|crypto signal|dropshipping)/.test(text)) score -= 70;
+  if (/(sponsored|advertisement)/.test(text)) score -= 20;
+  return Math.max(0, Math.min(100, score));
+}
+
+function computeQualityScore(item) {
+  const text = normalizeText(item.description || "");
+  const hasDesc = text.length >= 40;
+  const hasDate = Boolean(item.date_start || item.date_end || item.date_unknown);
+  const hasLocation = Boolean(item.address || item.location_name || normalizeCoordinates(item.lat, item.lon));
+  const trusted = /(\.gov|\.edu|city|county|university|library|nonprofit|hospital)/i.test(`${item.source_url || ""} ${item.source_name || ""}`);
+  let score = 20;
+  if (hasDesc) score += 25;
+  if (hasDate) score += 20;
+  if (hasLocation) score += 20;
+  if (trusted) score += 20;
+  if (item.type && item.type !== "event") score += 10;
+  return Math.max(0, Math.min(100, score));
+}
+
+function normalizeTypeFromPrimary(primary, subcategory, fallbackType) {
+  if (primary === "food_assistance") return subcategory === "donation" ? "donation" : "foodbank";
+  if (primary === "volunteer") return "volunteer";
+  if (primary === "clinic_legal") {
+    if (subcategory === "legal_aid") return "legal_aid";
+    if (subcategory === "shelter") return "shelter";
+    return "clinic";
+  }
+  if (primary === "networking") return "networking";
+  if (primary === "education") return subcategory === "workshop" ? "workshop" : "class";
+  if (primary === "organization" || primary === "resource") return "resource_center";
+  if (primary === "artist") return "event";
+  return fallbackType || "event";
+}
+
+async function aiBatchClassify(items) {
+  const apiKey = process.env.OPENAI_API_KEY;
+  if (!apiKey || !Array.isArray(items) || items.length === 0) return [];
+  const openai = new OpenAI({ apiKey });
+  const compact = items.slice(0, 80).map((item, index) => ({
+    index,
+    title: normalizeText(item.title || item.name || ""),
+    description: normalizeText(item.description || ""),
+    organizer: normalizeText(item.organizer || ""),
+    source: normalizeText(item.source_name || ""),
+    source_category: normalizeText(item.type || item.category || ""),
+  }));
+  try {
+    const completion = await openai.chat.completions.create({
+      model: "gpt-4o-mini",
+      temperature: 0.1,
+      response_format: { type: "json_object" },
+      messages: [
+        {
+          role: "system",
+          content: "Classify each listing. Return JSON: {\"items\":[{\"index\":number,\"primary_category\":\"event|volunteer|food_assistance|organization|clinic_legal|cultural|language_support|artist|education|networking|social|resource|other\",\"subcategory\":string,\"audience\":\"student|professional|general|families|seniors\",\"ai_tags\":string[],\"classification_confidence\":\"high|medium|low\",\"relevance_score\":number,\"quality_score\":number}]}.",
+        },
+        { role: "user", content: JSON.stringify({ listings: compact }) },
+      ],
+    });
+    const content = completion.choices?.[0]?.message?.content || "{}";
+    const parsed = JSON.parse(String(content).replace(/```json|```/gi, "").trim() || "{}");
+    return Array.isArray(parsed?.items) ? parsed.items : [];
+  } catch {
+    return [];
+  }
+}
+
+async function runQualityPipeline(items, { hideLowRelevance = true } = {}) {
+  const prepared = (Array.isArray(items) ? items : []).map((item) => ({ ...item }));
+  const withDeterministic = prepared.map((item) => {
+    const sourceCategory = normalizeText(item.type || item.category || "event").toLowerCase() || "event";
+    const primary = inferPrimaryCategory(item);
+    const sub = inferSubcategory(item, primary);
+    const relevance = computeRelevanceScore(item);
+    const quality = computeQualityScore(item);
+    const tags = inferAiTags(item);
+    const confidence = quality >= 75 ? "high" : quality >= 55 ? "medium" : "low";
+    const lowRelevance = relevance < 40;
+    const lowQuality = quality < 50;
+    const correctedType = normalizeTypeFromPrimary(primary, sub, sourceCategory);
+    return {
+      ...item,
+      source_category: sourceCategory,
+      primary_category: primary,
+      subcategory: sub,
+      type: correctedType,
+      audience: inferAudience(`${item.title || ""} ${item.description || ""}`),
+      ai_tags: tags,
+      relevance_score: relevance,
+      quality_score: quality,
+      classification_confidence: confidence,
+      low_relevance: lowRelevance,
+      low_quality: lowQuality,
+      needs_review: Boolean(item.needs_review) || confidence === "low" || lowQuality,
+      duplicate_of: null,
+      user_reports: Number(item.user_reports || 0),
+      report_types: Array.isArray(item.report_types) ? item.report_types : [],
+      classification_checked_at: new Date().toISOString(),
+    };
+  });
+
+  const ai = await aiBatchClassify(withDeterministic);
+  const aiMap = new Map(ai.filter((a) => Number.isFinite(Number(a.index))).map((a) => [Number(a.index), a]));
+  const merged = withDeterministic.map((item, index) => {
+    const a = aiMap.get(index);
+    if (!a) return item;
+    const primary = normalizeText(a.primary_category || item.primary_category || "event").toLowerCase();
+    const sub = normalizeText(a.subcategory || item.subcategory || "");
+    const relevance = Number.isFinite(Number(a.relevance_score)) ? Math.max(0, Math.min(100, Number(a.relevance_score))) : item.relevance_score;
+    const quality = Number.isFinite(Number(a.quality_score)) ? Math.max(0, Math.min(100, Number(a.quality_score))) : item.quality_score;
+    return {
+      ...item,
+      primary_category: primary || item.primary_category,
+      subcategory: sub || item.subcategory,
+      audience: ["student", "professional", "general", "families", "seniors"].includes(String(a.audience || "").toLowerCase())
+        ? String(a.audience).toLowerCase()
+        : item.audience,
+      ai_tags: Array.isArray(a.ai_tags) && a.ai_tags.length > 0 ? a.ai_tags : item.ai_tags,
+      relevance_score: relevance,
+      quality_score: quality,
+      classification_confidence: ["high", "medium", "low"].includes(String(a.classification_confidence || "").toLowerCase())
+        ? String(a.classification_confidence).toLowerCase()
+        : item.classification_confidence,
+      low_relevance: relevance < 40,
+      low_quality: quality < 50,
+      needs_review: item.needs_review || String(a.classification_confidence || "").toLowerCase() === "low" || quality < 50,
+      type: normalizeTypeFromPrimary(primary || item.primary_category, sub || item.subcategory, item.type),
+    };
+  });
+
+  const dedupeKeep = [];
+  for (const item of merged) {
+    const day = item.date_start ? String(item.date_start).slice(0, 10) : "unknown";
+    const venue = normalizeText(item.location_name || item.address).toLowerCase();
+    let duplicateOf = null;
+    for (const kept of dedupeKeep) {
+      const keptDay = kept.date_start ? String(kept.date_start).slice(0, 10) : "unknown";
+      const keptVenue = normalizeText(kept.location_name || kept.address).toLowerCase();
+      if (day !== keptDay || venue !== keptVenue) continue;
+      const sim = jaccardSimilarity(item.title || "", kept.title || "");
+      if (sim >= 0.8) {
+        duplicateOf = kept.id;
+        break;
+      }
+    }
+    if (duplicateOf) {
+      item.duplicate_of = duplicateOf;
+      continue;
+    }
+    dedupeKeep.push(item);
+  }
+
+  if (!hideLowRelevance) return dedupeKeep;
+  return dedupeKeep.filter((item) => !item.low_relevance);
 }
 
 function sourcesFromEnv() {
@@ -634,6 +1384,7 @@ async function fetchTicketmasterEvents(query, location) {
         `${venue?.address?.line1 || ""} ${venue?.city?.name || ""} ${venue?.state?.stateCode || ""}`
       ) || "Not listed";
       const text = `${event?.name || ""} ${event?.info || ""} ${event?.pleaseNote || ""} ${venue?.name || ""}`;
+      const normalizedCoords = normalizeCoordinates(venue?.location?.latitude, venue?.location?.longitude);
       return {
         id: canonicalUrl(event?.url || `ticketmaster-${idx}`),
         title: event?.name || "Ticketmaster Event",
@@ -644,8 +1395,9 @@ async function fetchTicketmasterEvents(query, location) {
         date_unknown: !dateStart,
         location_name: venue?.name || "Not listed",
         address: venueAddress,
-        lat: venue?.location?.latitude ? Number(venue.location.latitude) : null,
-        lon: venue?.location?.longitude ? Number(venue.location.longitude) : null,
+        lat: normalizedCoords?.lat ?? null,
+        lon: normalizedCoords?.lon ?? null,
+        location_confidence: normalizedCoords ? "high" : (venueAddress !== "Not listed" ? "medium" : "low"),
         distance_miles: null,
         organizer: event?.promoter?.name || "Not listed",
         description: normalizeText(event?.info || event?.pleaseNote || "Not listed"),
@@ -708,6 +1460,7 @@ async function fetchEventbriteEvents(query, location) {
         `${addressObj?.address_1 || ""} ${addressObj?.city || ""} ${addressObj?.region || ""}`
       ) || "Not listed";
       const text = `${event?.name?.text || ""} ${event?.description?.text || ""} ${event?.category_id || ""}`;
+      const normalizedCoords = normalizeCoordinates(addressObj?.latitude, addressObj?.longitude);
       return {
         id: canonicalUrl(event?.url || `eventbrite-${idx}`),
         title: event?.name?.text || "Eventbrite Event",
@@ -718,8 +1471,9 @@ async function fetchEventbriteEvents(query, location) {
         date_unknown: !(event?.start?.utc || event?.start?.local),
         location_name: venue?.name || "Not listed",
         address,
-        lat: addressObj?.latitude ? Number(addressObj.latitude) : null,
-        lon: addressObj?.longitude ? Number(addressObj.longitude) : null,
+        lat: normalizedCoords?.lat ?? null,
+        lon: normalizedCoords?.lon ?? null,
+        location_confidence: normalizedCoords ? "high" : (address !== "Not listed" ? "medium" : "low"),
         distance_miles: null,
         organizer: event?.organizer?.name || "Not listed",
         description: normalizeText(event?.summary || event?.description?.text || "Not listed"),
@@ -814,26 +1568,48 @@ async function scrapeSources(query, location) {
     ...ticketmasterEvents,
     ...eventbriteEvents,
   ]);
-  const organizations = deduped
+  const enriched = await runQualityPipeline(deduped, { hideLowRelevance: true });
+  const organizations = enriched
     .filter((item) => ["legal_aid", "clinic", "shelter", "resource_center", "foodbank", "donation"].includes(item.type))
     .slice(0, 50)
-    .map((item) => ({
-      name: item.organizer && item.organizer !== "Not listed" ? item.organizer : item.title,
-      category: inferOrgCategory(`${item.title} ${item.description} ${item.location_name}`),
-      address: item.address || "Not listed",
-      phone: "Not listed",
-      hours: "Not listed",
-      services: [item.type.replace("_", " ")],
-      eligibility: "Not listed",
-      source_url: item.source_url,
-      distance_miles: item.distance_miles ?? null,
-    }));
+    .map((item) => {
+      const text = `${item.title} ${item.description} ${item.location_name} ${item.organizer || ""}`;
+      const supported = inferSupportedLanguages(text);
+      const cultural = inferCulturalGroups(text);
+      const translationServices = /(translation|interpretation|language assistance|bilingual|multilingual)/i.test(text);
+      const translationLanguages = translationServices ? supported : [];
+      const immigrantSupport = /(immigration|immigrant|refugee|asylum|visa|new resident|newcomer)/i.test(text);
+      const newcomerSupport = /(newcomer|new resident|orientation|settlement)/i.test(text);
+      const normalizedCoords = normalizeCoordinates(item.lat, item.lon);
+      return {
+        name: item.organizer && item.organizer !== "Not listed" ? item.organizer : item.title,
+        category: inferOrgCategory(text),
+        address: item.address || "Not listed",
+        lat: normalizedCoords?.lat ?? null,
+        lon: normalizedCoords?.lon ?? null,
+        phone: "Not listed",
+        hours: "Not listed",
+        services: [item.type.replace("_", " ")],
+        eligibility: "Not listed",
+        description: item.description || "Not listed",
+        cultural_groups: cultural,
+        supported_languages: supported,
+        translation_services: translationServices,
+        translation_languages: translationLanguages,
+        immigrant_support: immigrantSupport,
+        newcomer_support: newcomerSupport,
+        source_url: item.source_url,
+        confidence: { overall: "medium" },
+        distance_miles: item.distance_miles ?? null,
+      };
+    });
 
   const payload = {
-    results: deduped,
+    results: enriched,
     organizations,
     notes: [
       `Deterministic scraper fallback used (${sources.length} configured feeds, ${deduped.length} deduplicated listings).`,
+      `AI quality pipeline applied (${enriched.length} items after relevance + duplicate filtering).`,
       `API sources used: Ticketmaster ${ticketmasterEvents.length > 0 ? "enabled" : "not configured/empty"}, Eventbrite ${eventbriteEvents.length > 0 ? "enabled" : "not configured/empty"}.`,
       "Classification is rule-based; review items marked needs_review."
     ],
@@ -856,8 +1632,217 @@ async function startServer() {
     res.json({ status: "ok" });
   });
 
+  app.post("/api/help-support/translators", async (req, res) => {
+    const {
+      location = null,
+      radius_miles = 25,
+      language_needed = [],
+      service_type = "both",
+      mode = "any",
+      specialization = "general",
+      cost = "any",
+      availability = "any",
+    } = req.body || {};
+
+    const langs = Array.isArray(language_needed)
+      ? language_needed.map((l) => normalizeText(l).toLowerCase()).filter(Boolean)
+      : [normalizeText(language_needed).toLowerCase()].filter(Boolean);
+
+    const rows = db.prepare("SELECT * FROM translator_entities ORDER BY last_updated DESC").all();
+    let local = rows.map((r) => ({
+      ...r,
+      languages_supported: (() => { try { return JSON.parse(r.languages_supported || "[]"); } catch { return []; } })(),
+      specializations: (() => { try { return JSON.parse(r.specializations || "[]"); } catch { return []; } })(),
+      confidence: { overall: r.confidence_overall || "medium" },
+    }));
+
+    local = local.filter((item) => {
+      if (langs.length > 0) {
+        const supported = (item.languages_supported || []).map((l) => String(l).toLowerCase());
+        if (!langs.some((l) => supported.some((s) => s.includes(l) || l.includes(s)))) return false;
+      }
+      if (service_type !== "both" && item.service_type !== service_type && item.service_type !== "both") return false;
+      if (mode !== "any" && item.mode !== mode && item.mode !== "any") return false;
+      if (specialization !== "general" && !(item.specializations || []).includes(specialization)) return false;
+      if (cost !== "any" && item.cost !== cost && item.cost !== "any") return false;
+      if (availability !== "any") {
+        const notes = `${item.notes || ""} ${item.hours || ""}`.toLowerCase();
+        if (availability === "same_day" && !/(same day|today|24\/7|24x7)/.test(notes)) return false;
+        if (availability === "weekends" && !/(weekend|sat|sun)/.test(notes)) return false;
+      }
+      const coords = normalizeCoordinates(item.lat, item.lon);
+      if (location?.latitude != null && location?.longitude != null && coords) {
+        const d = calculateDistanceMiles(location.latitude, location.longitude, coords.lat, coords.lon);
+        if (d > Number(radius_miles || 25)) return false;
+        item.distance_miles = Number(d.toFixed(1));
+      }
+      return true;
+    });
+
+    let source = "local_db";
+    if (local.length < 5) {
+      const query = `${langs.join(" ")} ${service_type} ${specialization} translator interpreter near me`.trim();
+      const scraped = await scrapeSources(query, location);
+      let mined = mapItemsToTranslators(scraped.results || [], location, Number(radius_miles || 25), 120);
+
+      if (mined.length < 3) {
+        try {
+          const apiKey = process.env.BACKBOARD_API_KEY || process.env.BACKBOARD_API || "";
+          const base = process.env.BACKBOARD_API_URL || "https://api.backboard.io";
+          if (apiKey) {
+            const response = await fetch(`${base.replace(/\/$/, "")}/v1/search`, {
+              method: "POST",
+              headers: { "Content-Type": "application/json", Authorization: `Bearer ${apiKey}`, "x-api-key": apiKey },
+              body: JSON.stringify({
+                query: `Find local translators and interpreters. Languages: ${langs.join(", ") || "any"}.`,
+                location: location ? { lat: location.latitude, lon: location.longitude } : null,
+                radius_miles: Number(radius_miles || 25),
+              }),
+            });
+            if (response.ok) {
+              const payload = await response.json();
+              const normalized = normalizeBackboardResults(payload);
+              mined = [...mined, ...mapItemsToTranslators(normalized, location, Number(radius_miles || 25), 120)];
+            }
+          }
+        } catch {}
+      }
+
+      const dedupe = new Map();
+      for (const t of mined) {
+        const key = `${normalizeText(t.name).toLowerCase()}|${normalizeText(t.address).toLowerCase()}`;
+        if (!dedupe.has(key)) dedupe.set(key, t);
+      }
+      const fresh = [...dedupe.values()];
+      const upsert = db.prepare(`
+        INSERT OR REPLACE INTO translator_entities (
+          id,name,service_type,languages_supported,specializations,mode,cost,service_area,address,lat,lon,phone,email,website,hours,notes,source_name,source_url,retrieved_at,confidence_overall,last_updated
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+      `);
+      const tx = db.transaction((list) => {
+        for (const it of list) {
+          upsert.run(
+            it.id || randomUUID(),
+            it.name || "Translator",
+            it.service_type || "both",
+            JSON.stringify(it.languages_supported || []),
+            JSON.stringify(it.specializations || ["general"]),
+            it.mode || "any",
+            it.cost || "any",
+            it.service_area || "Local",
+            it.address || "Not listed",
+            it.lat ?? null,
+            it.lon ?? null,
+            it.phone || "Not listed",
+            it.email || "Not listed",
+            it.website || "",
+            it.hours || "Not listed",
+            it.notes || "",
+            it.source_name || "Unknown",
+            it.source_url || "",
+            it.retrieved_at || new Date().toISOString(),
+            it.confidence?.overall || "medium"
+          );
+        }
+      });
+      tx(fresh);
+      source = fresh.length > 0 ? "online_fallback_stored" : source;
+      local = [...local, ...fresh];
+    }
+
+    res.json({
+      translators: local.slice(0, 120),
+      notes: [source === "local_db" ? "Loaded from local cache/database first." : "Local-first lookup expanded with online fallback and stored locally."],
+      api_sources: [source],
+    });
+  });
+
+  app.post("/api/help-support/newcomer-guides", async (req, res) => {
+    const { location = null, language = "", topic = "all", format = "any" } = req.body || {};
+    const lang = normalizeText(language).toLowerCase();
+    const rows = db.prepare("SELECT * FROM newcomer_guides ORDER BY last_updated DESC").all();
+    let local = rows.map((r) => ({
+      ...r,
+      confidence: { overall: r.confidence_overall || "medium" },
+    }));
+
+    local = local.filter((g) => {
+      if (lang && String(g.language || "").toLowerCase() !== lang) return false;
+      if (topic !== "all" && g.topic !== topic) return false;
+      if (format !== "any" && g.format !== format) return false;
+      return true;
+    });
+
+    let source = "local_db";
+    if (local.length < 6) {
+      const query = `newcomer guide ${topic !== "all" ? topic : ""} ${lang || ""}`.trim();
+      const scraped = await scrapeSources(query, location);
+      let mined = mapItemsToNewcomerGuides(scraped.results || [], 120);
+
+      if (mined.length < 4) {
+        try {
+          const apiKey = process.env.BACKBOARD_API_KEY || process.env.BACKBOARD_API || "";
+          const base = process.env.BACKBOARD_API_URL || "https://api.backboard.io";
+          if (apiKey) {
+            const response = await fetch(`${base.replace(/\/$/, "")}/v1/search`, {
+              method: "POST",
+              headers: { "Content-Type": "application/json", Authorization: `Bearer ${apiKey}`, "x-api-key": apiKey },
+              body: JSON.stringify({
+                query: `Find newcomer guides for ${topic !== "all" ? topic : "documentation, healthcare, housing, education"} in ${lang || "any language"}`,
+                location: location ? { lat: location.latitude, lon: location.longitude } : null,
+              }),
+            });
+            if (response.ok) {
+              const payload = await response.json();
+              const normalized = normalizeBackboardResults(payload);
+              mined = [...mined, ...mapItemsToNewcomerGuides(normalized, 120)];
+            }
+          }
+        } catch {}
+      }
+
+      const dedupe = new Map();
+      for (const g of mined) {
+        const key = normalizeText(g.source_url || g.title).toLowerCase();
+        if (!dedupe.has(key)) dedupe.set(key, g);
+      }
+      const fresh = [...dedupe.values()];
+      const upsert = db.prepare(`
+        INSERT OR REPLACE INTO newcomer_guides (
+          id,title,topic,language,format,summary,source_name,source_url,retrieved_at,local_relevance,confidence_overall,last_updated
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+      `);
+      const tx = db.transaction((list) => {
+        for (const it of list) {
+          upsert.run(
+            it.id || randomUUID(),
+            it.title || "Newcomer Guide",
+            it.topic || "documentation",
+            it.language || "English",
+            it.format || "article",
+            it.summary || "Not listed",
+            it.source_name || "Unknown",
+            it.source_url || "",
+            it.retrieved_at || new Date().toISOString(),
+            it.local_relevance || "medium",
+            it.confidence?.overall || "medium"
+          );
+        }
+      });
+      tx(fresh);
+      source = fresh.length > 0 ? "online_fallback_stored" : source;
+      local = [...local, ...fresh];
+    }
+
+    res.json({
+      guides: local.slice(0, 160),
+      notes: [source === "local_db" ? "Loaded from local cache/database first." : "Local-first lookup expanded with online fallback and stored locally."],
+      api_sources: [source],
+    });
+  });
+
   // API Routes
-  app.get("/api/items/:tab", (req, res) => {
+  app.get("/api/items/:tab", async (req, res) => {
     const { tab } = req.params;
     let items;
     if (tab === "all" || tab === "map_view") {
@@ -865,7 +1850,7 @@ async function startServer() {
     } else if (tab === "mylist" || tab === "connections") {
       items = [];
     } else if (tab === "clinics_legal") {
-      items = db.prepare("SELECT * FROM community_items WHERE type IN ('clinic', 'legal_aid')").all();
+      items = db.prepare("SELECT * FROM community_items WHERE type IN ('clinic', 'legal_aid', 'shelter', 'resource_center')").all();
     } else if (tab === "organizations") {
       items = db.prepare("SELECT * FROM community_items WHERE type IN ('organization', 'resource_center', 'shelter', 'legal_aid', 'clinic')").all();
     } else if (tab === "foodbanks") {
@@ -877,7 +1862,7 @@ async function startServer() {
     } else {
       items = [];
     }
-    const normalizedItems = items.map((item) => {
+    let normalizedItems = items.map((item) => {
       let parsedServices = null;
       if (typeof item.services === "string" && item.services.trim()) {
         try {
@@ -894,15 +1879,42 @@ async function startServer() {
         ...item,
         description: item.description || "",
         services: parsedServices,
+        ai_tags: (() => {
+          if (typeof item.ai_tags === "string" && item.ai_tags.trim()) {
+            try { return JSON.parse(item.ai_tags); } catch { return []; }
+          }
+          return Array.isArray(item.ai_tags) ? item.ai_tags : [];
+        })(),
+        report_types: (() => {
+          if (typeof item.report_types === "string" && item.report_types.trim()) {
+            try { return JSON.parse(item.report_types); } catch { return []; }
+          }
+          return Array.isArray(item.report_types) ? item.report_types : [];
+        })(),
         date_unknown: Boolean(item.date_unknown),
         needs_review: Boolean(item.needs_review),
+        verified_source: Boolean(item.verified_source),
+        low_relevance: Boolean(item.low_relevance),
+        low_quality: Boolean(item.low_quality),
       };
+    }).filter((item) => !item.low_relevance);
+
+    const sevenDaysMs = 7 * 24 * 60 * 60 * 1000;
+    const needsReclassification = normalizedItems.some((item) => {
+      if (!item.primary_category || !item.classification_checked_at) return true;
+      const checkedAt = new Date(item.classification_checked_at).getTime();
+      if (Number.isNaN(checkedAt)) return true;
+      return (Date.now() - checkedAt) > sevenDaysMs;
     });
+    if (needsReclassification) {
+      const reclassified = await runQualityPipeline(normalizedItems, { hideLowRelevance: true });
+      normalizedItems = reclassified;
+    }
     const cache = db.prepare("SELECT summary FROM search_cache WHERE tab = ?").get(tab);
     res.json({ items: normalizedItems, summary: cache?.summary || "" });
   });
 
-  app.post("/api/items", (req, res) => {
+  app.post("/api/items", async (req, res) => {
     const { items, organizations, summary, tab } = req.body;
     
     const insertItem = db.prepare(`
@@ -911,13 +1923,17 @@ async function startServer() {
         type, audience, latitude, longitude, distance_miles, organizer, accessibility_notes,
         source_name, source_url, confidence_overall, confidence_date, confidence_location,
         confidence_type, needs_review, category, phone, hours, services, eligibility,
-        retrieved_at, fieldOfStudy, academicLevel, careerFocus, industry, seniorityLevel, networkingVsTraining
+        retrieved_at, location_confidence, neighborhood, verified_source, recommended_by_users,
+        fieldOfStudy, academicLevel, careerFocus, industry, seniorityLevel, networkingVsTraining,
+        primary_category, subcategory, ai_tags, relevance_score, quality_score, classification_confidence,
+        low_relevance, low_quality, source_category, duplicate_of, user_reports, report_types, classification_checked_at
       )
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
 
     const transaction = db.transaction((list) => {
       for (const item of list) {
+        const normalized = normalizeCoordinates(item.lat ?? item.latitude, item.lon ?? item.longitude);
         insertItem.run(
           item.id || item.name || Math.random().toString(36).substr(2, 9),
           item.title || item.name,
@@ -929,8 +1945,8 @@ async function startServer() {
           item.date_unknown ? 1 : 0,
           item.type || "organization",
           item.audience || "general",
-          item.lat || item.latitude || null,
-          item.lon || item.longitude || null,
+          normalized?.lat ?? null,
+          normalized?.lon ?? null,
           item.distance_miles || null,
           item.organizer || null,
           item.accessibility_notes || null,
@@ -947,20 +1963,38 @@ async function startServer() {
           item.services ? JSON.stringify(item.services) : null,
           item.eligibility || null,
           item.retrieved_at || new Date().toISOString(),
+          item.location_confidence || ((item.address || item.location_name) ? "medium" : "low"),
+          item.neighborhood || null,
+          item.verified_source ? 1 : 0,
+          Number(item.recommended_by_users || 0),
           item.fieldOfStudy || null,
           item.academicLevel || null,
           item.careerFocus || null,
           item.industry || null,
           item.seniorityLevel || null,
-          item.networkingVsTraining || null
+          item.networkingVsTraining || null,
+          item.primary_category || null,
+          item.subcategory || null,
+          Array.isArray(item.ai_tags) ? JSON.stringify(item.ai_tags) : null,
+          Number.isFinite(Number(item.relevance_score)) ? Number(item.relevance_score) : null,
+          Number.isFinite(Number(item.quality_score)) ? Number(item.quality_score) : null,
+          item.classification_confidence || null,
+          item.low_relevance ? 1 : 0,
+          item.low_quality ? 1 : 0,
+          item.source_category || null,
+          item.duplicate_of || null,
+          Number(item.user_reports || 0),
+          Array.isArray(item.report_types) ? JSON.stringify(item.report_types) : null,
+          item.classification_checked_at || new Date().toISOString()
         );
       }
     });
 
     const allItems = [...(items || []), ...(organizations || [])];
+    const processed = await runQualityPipeline(allItems, { hideLowRelevance: true });
     const seen = new Set();
     const deduped = [];
-    for (const item of allItems) {
+    for (const item of processed) {
       const title = normalizeText(item.title || item.name).toLowerCase();
       const locationName = normalizeText(item.location_name || item.address).toLowerCase();
       const day = item.date_start ? String(item.date_start).slice(0, 10) : "unknown";
@@ -1172,6 +2206,44 @@ async function startServer() {
     return res.json({ message });
   });
 
+  app.post("/api/listings/repair", async (req, res) => {
+    const input = Array.isArray(req.body?.items) ? req.body.items : [];
+    if (input.length === 0) {
+      return res.json({ items: [], notes: [] });
+    }
+
+    const cleaned = input.slice(0, 200).map((item) => ({
+      ...item,
+      title: cleanListingText(item.title || item.name || ""),
+      location_name: cleanListingText(item.location_name || ""),
+      address: cleanListingText(item.address || ""),
+      description: cleanListingText(item.description || ""),
+    }));
+
+    const aiRepairs = await aiRepairListings(cleaned);
+    const repairMap = new Map(
+      aiRepairs
+        .filter((r) => Number.isFinite(Number(r.index)))
+        .map((r) => [Number(r.index), r])
+    );
+
+    const merged = cleaned.map((item, idx) => {
+      const repair = repairMap.get(idx);
+      if (!repair) return item;
+      return {
+        ...item,
+        location_name: cleanListingText(repair.location_name || item.location_name || ""),
+        address: cleanListingText(repair.address || item.address || ""),
+        description: cleanListingText(repair.description || item.description || ""),
+      };
+    });
+
+    return res.json({
+      items: merged,
+      notes: [aiRepairs.length > 0 ? "AI-assisted listing normalization applied." : "Rule-based listing normalization applied."],
+    });
+  });
+
   app.post("/api/geocode/batch", async (req, res) => {
     const queries = Array.isArray(req.body?.queries) ? req.body.queries : [];
     const unique = [...new Set(queries.map((q) => normalizeText(q)).filter(Boolean))].slice(0, 1000);
@@ -1187,13 +2259,286 @@ async function startServer() {
     return res.json({ results });
   });
 
+  app.get("/api/videos/search", async (req, res) => {
+    const apiKey = process.env.YOUTUBE_API_KEY || process.env.YOUTUBE_API || "";
+    const query = normalizeText(req.query.q || "");
+    const order = normalizeText(req.query.order || "relevance");
+    const duration = normalizeText(req.query.duration || "any"); // short|medium|long|any
+    const maxResults = Math.max(1, Math.min(25, Number(req.query.maxResults || 12)));
+    const pageToken = normalizeText(req.query.pageToken || "");
+    if (!apiKey) {
+      return res.status(400).json({ videos: [], error: "YOUTUBE_API_KEY is not configured" });
+    }
+    if (!query) {
+      return res.json({ videos: [] });
+    }
+
+    try {
+      const searchParams = new URLSearchParams({
+        key: apiKey,
+        q: query,
+        part: "snippet",
+        type: "video",
+        maxResults: String(maxResults),
+        order: ["date", "relevance", "rating", "title", "viewCount"].includes(order) ? order : "relevance",
+      });
+      if (duration && duration !== "any") {
+        searchParams.set("videoDuration", duration);
+      }
+      if (pageToken) {
+        searchParams.set("pageToken", pageToken);
+      }
+      const searchResp = await fetch(`https://www.googleapis.com/youtube/v3/search?${searchParams.toString()}`);
+      if (!searchResp.ok) {
+        return res.status(searchResp.status).json({ videos: [], error: "YouTube search failed" });
+      }
+      const searchData = await searchResp.json();
+      const items = searchData.items || [];
+      const ids = items.map((i) => i.id?.videoId).filter(Boolean);
+      if (ids.length === 0) {
+        return res.json({ videos: [], nextPageToken: searchData.nextPageToken || null });
+      }
+
+      const detailsParams = new URLSearchParams({
+        key: apiKey,
+        part: "contentDetails,snippet",
+        id: ids.join(","),
+      });
+      const detailsResp = await fetch(`https://www.googleapis.com/youtube/v3/videos?${detailsParams.toString()}`);
+      const detailsData = detailsResp.ok ? await detailsResp.json() : { items: [] };
+      const detailMap = new Map((detailsData.items || []).map((v) => [v.id, v]));
+
+      const localTerms = /(chapel hill|durham|raleigh|triangle|north carolina|nc|community|local|neighborhood)/i;
+      const videos = items.map((item) => {
+        const videoId = item.id.videoId;
+        const d = detailMap.get(videoId);
+        const durationIso = d?.contentDetails?.duration || "";
+        const mins = parseIso8601DurationToMinutes(durationIso);
+        const channelType = classifyChannelType(item.snippet?.channelTitle || "", item.snippet?.description || "");
+        const text = `${item.snippet?.title || ""} ${item.snippet?.description || ""}`;
+        return {
+          video_id: videoId,
+          title: item.snippet?.title || "Untitled",
+          channel_name: item.snippet?.channelTitle || "Unknown",
+          channel_type: channelType,
+          published_date: item.snippet?.publishedAt || null,
+          duration: durationIso,
+          duration_minutes: mins,
+          thumbnail: item.snippet?.thumbnails?.medium?.url || item.snippet?.thumbnails?.default?.url || "",
+          description: item.snippet?.description || "",
+          watch_url: `https://www.youtube.com/watch?v=${videoId}`,
+          embed_url: `https://www.youtube.com/embed/${videoId}`,
+          local_relevance: localTerms.test(text) ? "high" : "medium",
+        };
+      });
+
+      return res.json({ videos, nextPageToken: searchData.nextPageToken || null });
+    } catch (err) {
+      return res.status(500).json({ videos: [], error: "YouTube integration failed" });
+    }
+  });
+
+  app.post("/api/artists/search", async (req, res) => {
+    const { query = "", location = null, radius_miles = 25, page = 1, page_size = 20 } = req.body || {};
+    const limit = Math.max(1, Math.min(100, Number(page_size) || 20));
+    let all = discoverArtistsFromDb(query, location, Number(radius_miles || 25), 500);
+    let source = "local_db";
+
+    if (all.length === 0) {
+      try {
+        const apiKey = process.env.BACKBOARD_API_KEY || process.env.BACKBOARD_API || "";
+        const base = process.env.BACKBOARD_API_URL || "https://api.backboard.io";
+        if (apiKey) {
+          const candidates = [
+            `${base.replace(/\/$/, "")}/v1/search`,
+            `${base.replace(/\/$/, "")}/search`,
+          ];
+          for (const url of candidates) {
+            try {
+              const response = await fetch(url, {
+                method: "POST",
+                headers: {
+                  "Content-Type": "application/json",
+                  Authorization: `Bearer ${apiKey}`,
+                  "x-api-key": apiKey,
+                },
+                body: JSON.stringify({
+                  query: `Find local artists (musicians, painters, photographers, performers, creators) near me. ${normalizeText(query) || ""}`,
+                  location: location ? { lat: location.latitude, lon: location.longitude } : null,
+                  radius_miles: Number(radius_miles || 25),
+                }),
+              });
+              if (!response.ok) continue;
+              const payload = await response.json();
+              const normalized = normalizeBackboardResults(payload);
+              const aiArtists = mapItemsToArtists(normalized, location, Number(radius_miles || 25), 500);
+              if (aiArtists.length > 0) {
+                all = aiArtists;
+                source = "backboard_ai";
+                break;
+              }
+            } catch {
+              // Try next Backboard URL shape.
+            }
+          }
+        }
+      } catch {
+        // Keep fallback path.
+      }
+    }
+
+    if (all.length === 0) {
+      try {
+        const scraped = await scrapeSources(`local artists ${query || ""}`.trim(), location);
+        all = mapItemsToArtists(scraped.results || [], location, Number(radius_miles || 25), 500);
+        if (all.length > 0) source = "scraper_fallback";
+      } catch {
+        // Ignore scrape fallback errors.
+      }
+    }
+
+    const safePage = Math.max(1, Number(page) || 1);
+    const start = (safePage - 1) * limit;
+    const paged = all.slice(start, start + limit);
+    return res.json({
+      artists: paged,
+      total: all.length,
+      page: safePage,
+      page_size: limit,
+      api_sources: [source],
+    });
+  });
+
+  app.post("/api/assistant/query", async (req, res) => {
+    const { message = "", location = null } = req.body || {};
+    const q = normalizeText(message).toLowerCase();
+    if (!q) return res.json({ answer: "Ask me what you want to find nearby.", suggestions: [] });
+    const rows = db.prepare("SELECT * FROM community_items").all();
+    const matches = rows.filter((row) => {
+      const text = `${row.title || ""} ${row.description || ""} ${row.type || ""} ${row.category || ""}`.toLowerCase();
+      return q.split(/\s+/).every((token) => text.includes(token) || token.length <= 2);
+    }).slice(0, 5);
+    const suggestions = matches.map((m) => ({
+      title: m.title,
+      type: m.type,
+      source_url: m.source_url,
+      location_name: m.location_name || m.address || "Not listed",
+      distance_miles: (location?.latitude != null && location?.longitude != null && normalizeCoordinates(m.latitude, m.longitude))
+        ? Number(calculateDistanceMiles(location.latitude, location.longitude, m.latitude, m.longitude).toFixed(1))
+        : null,
+    }));
+    if (suggestions.length > 0) {
+      return res.json({
+        answer: `Found ${suggestions.length} matching items. Open details for directions and source links.`,
+        suggestions,
+        api_sources: ["local_cache"],
+      });
+    }
+
+    // Backboard assistant fallback for no local matches.
+    try {
+      const apiKey = process.env.BACKBOARD_API_KEY || process.env.BACKBOARD_API || "";
+      const base = process.env.BACKBOARD_API_URL || "https://api.backboard.io";
+      if (apiKey) {
+        const response = await fetch(`${base.replace(/\/$/, "")}/v1/search`, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${apiKey}`,
+            "x-api-key": apiKey,
+          },
+          body: JSON.stringify({
+            query: message,
+            location: location ? { lat: location.latitude, lon: location.longitude } : null,
+          }),
+        });
+        if (response.ok) {
+          const payload = await response.json();
+          const items = normalizeBackboardResults(payload).slice(0, 5);
+          const backboardSuggestions = items.map((m) => ({
+            title: m.title,
+            type: m.type,
+            source_url: m.source_url,
+            location_name: m.location_name || m.address || "Not listed",
+            distance_miles: null,
+          }));
+          if (backboardSuggestions.length > 0) {
+            return res.json({
+              answer: `No exact local match found. I pulled ${backboardSuggestions.length} additional web results.`,
+              suggestions: backboardSuggestions,
+              api_sources: ["backboard"],
+            });
+          }
+        }
+      }
+    } catch {
+      // Ignore fallback errors.
+    }
+
+    return res.json({
+      answer: "No exact match in current data. Try broader keywords or refresh nearby sources.",
+      suggestions: [],
+      api_sources: ["local_cache"],
+    });
+  });
+
+  app.post("/api/backboard/search", async (req, res) => {
+    const apiKey = process.env.BACKBOARD_API_KEY || process.env.BACKBOARD_API || "";
+    const base = process.env.BACKBOARD_API_URL || "https://api.backboard.io";
+    const { query = "", location = null } = req.body || {};
+    if (!apiKey) {
+      return res.status(400).json({ items: [], notes: ["Backboard API key not configured"] });
+    }
+
+    const candidates = [
+      `${base.replace(/\/$/, "")}/v1/search`,
+      `${base.replace(/\/$/, "")}/search`,
+    ];
+
+    for (const url of candidates) {
+      try {
+        const response = await fetch(url, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${apiKey}`,
+            "x-api-key": apiKey,
+          },
+          body: JSON.stringify({
+            query,
+            location: location
+              ? { lat: location.latitude, lon: location.longitude }
+              : null,
+            radius_miles: Number(process.env.SCRAPER_RADIUS_MILES || 25),
+          }),
+        });
+        if (!response.ok) continue;
+        const payload = await response.json();
+        const normalized = normalizeBackboardResults(payload);
+        const items = await runQualityPipeline(normalized, { hideLowRelevance: true });
+        return res.json({
+          items,
+          organizations: [],
+          notes: ["Backboard failover used", "AI quality pipeline applied"],
+          api_sources: ["backboard"],
+        });
+      } catch {
+        // Try next candidate.
+      }
+    }
+
+    return res.status(502).json({ items: [], notes: ["Backboard request failed"], api_sources: ["backboard"] });
+  });
+
   app.post("/api/scrape-fallback", async (req, res) => {
     const { query, location } = req.body || {};
     const scraped = await scrapeSources(query || "", location);
+    const resultsWithCoordinates = (scraped.results || []).filter((item) => isValidCoordinate(item.lat, item.lon)).length;
     res.json({
       ui_layout: {
         layout_type: "two_column_nextdoor_style_v3",
-        left_tabs: ["events","volunteer","food_assistance","organizations","clinics_legal","connections","saved","map_all","settings"],
+        left_tabs: ["events","volunteer","food_assistance","organizations","help_support","connections","saved","map_all","settings"],
+        help_support_sections: ["clinics","legal_aid","shelters","translators","newcomer_guides"],
         right_view_mode: "list",
         active_tab: "events"
       },
@@ -1239,6 +2584,20 @@ async function startServer() {
           interests: []
         }
       },
+      map_scope: "radius",
+      map_debug: {
+        total_results: scraped.results?.length || 0,
+        results_with_coordinates: resultsWithCoordinates,
+        markers_displayed: resultsWithCoordinates
+      },
+      layout_debug: {
+        sidebar_width_px: 260,
+        content_start_px: 260,
+        content_width_px: 1200,
+        horizontal_gap_px: 0
+      },
+      api_sources: ["youtube", "openstreetmap", "nominatim", "scraper"],
+      ai_assistant_enabled: true,
       ui_settings: {
         appearance: "system",
         accent_preset: "failover",
@@ -1246,9 +2605,15 @@ async function startServer() {
         high_contrast_mode: false,
         large_text_mode: false,
         reduced_motion: false,
+        translation_enabled: true,
+        interface_language: "English",
       },
       results: scraped.results,
       organizations: scraped.organizations,
+      help_support: {
+        translators: [],
+        newcomer_guides: [],
+      },
       connections: [],
       messages: [],
       notes: scraped.notes,
@@ -1282,9 +2647,10 @@ async function startServer() {
             {
               "ui_layout": {
                 "layout_type": "two_column_nextdoor_style_v3",
-                "left_tabs": ["events","volunteer","food_assistance","organizations","clinics_legal","connections","saved","map_all","settings"],
+                "left_tabs": ["events","volunteer","food_assistance","organizations","help_support","connections","saved","map_all","settings"],
+                "help_support_sections": ["clinics","legal_aid","shelters","translators","newcomer_guides"],
                 "right_view_mode": "list|map|split",
-                "active_tab": "events|volunteer|food_assistance|organizations|clinics_legal|connections|saved|map_all|settings"
+                "active_tab": "events|volunteer|food_assistance|organizations|help_support|connections|saved|map_all|settings"
               },
               "query_context": {
                 "user_timezone": "America/New_York",
@@ -1364,6 +2730,26 @@ async function startServer() {
       });
 
       const result = JSON.parse(completion.choices[0].message.content || "{}");
+      const processedResults = await runQualityPipeline(result.results || [], { hideLowRelevance: true });
+      const processedOrgs = await runQualityPipeline(
+        (result.organizations || []).map((org, idx) => ({
+          id: org.id || `org-${idx}-${normalizeText(org.name || "organization").toLowerCase().replace(/\s+/g, "-")}`,
+          title: org.name || "Organization",
+          description: org.description || "",
+          location_name: org.name || "",
+          address: org.address || "",
+          type: org.category === "legal_aid" ? "legal_aid" : org.category === "free_clinic" ? "clinic" : org.category === "food_assistance" ? "foodbank" : "resource_center",
+          audience: "general",
+          source_url: org.source_url || "",
+          source_name: "OpenAI failover",
+          lat: org.lat ?? null,
+          lon: org.lon ?? null,
+        })),
+        { hideLowRelevance: true }
+      );
+      result.results = processedResults;
+      result.organizations = processedOrgs;
+      result.notes = [...(result.notes || []), "AI quality pipeline applied (classification, relevance, dedupe)."];
       res.json(result);
     } catch (error) {
       console.error("OpenAI Error:", error);
