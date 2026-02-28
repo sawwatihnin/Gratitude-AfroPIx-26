@@ -175,3 +175,70 @@ export interface NewcomerGuide {
   local_relevance: 'high' | 'medium' | 'low';
   confidence: { overall: 'high' | 'medium' | 'low' };
 }
+
+export interface CivicsElection {
+  election_id: string;
+  name: string;
+  jurisdiction: {
+    country: string;
+    state_or_region: string;
+    county_or_district: string;
+    city_or_locality: string;
+  };
+  election_date: string;
+  election_type: 'general' | 'primary' | 'local' | 'special' | 'runoff' | 'referendum' | 'unknown';
+  election_level?: 'federal' | 'state' | 'county' | 'local' | 'all';
+  official_portal_name: string;
+  official_portal_url: string;
+  retrieved_at: string;
+  confidence: { overall: 'high' | 'medium' | 'low' };
+}
+
+export interface CivicsCandidate {
+  candidate_id: string;
+  name: string;
+  office: {
+    office_name: string;
+    level: 'local' | 'state' | 'national' | 'unknown';
+    district: string;
+  };
+  party_affiliation: string;
+  incumbent: boolean | null;
+  campaign_links: {
+    official_website: string;
+    social: string[];
+  };
+  highlights: Array<{
+    label: string;
+    summary: string;
+    source_url: string;
+    retrieved_at: string;
+  }>;
+  connections: Array<{
+    type: 'endorsement' | 'donor' | 'organization_link' | 'coalition' | 'previous_role' | 'unknown';
+    entity_name: string;
+    summary: string;
+    source_url: string;
+    retrieved_at: string;
+  }>;
+  ai_quality: {
+    relevance_score: number;
+    classification_confidence: 'high' | 'medium' | 'low';
+  };
+}
+
+export interface CivicsOrg {
+  org_id: string;
+  name: string;
+  category: 'party_committee' | 'civic_group' | 'advocacy_group' | 'student_org' | 'other';
+  address: string;
+  lat: number | null;
+  lon: number | null;
+  phone: string;
+  email: string;
+  website: string;
+  services: string[];
+  source_url: string;
+  retrieved_at: string;
+  confidence: { overall: 'high' | 'medium' | 'low' };
+}

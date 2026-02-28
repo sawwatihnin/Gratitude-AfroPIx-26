@@ -352,6 +352,79 @@ db.exec(`
     confidence_overall TEXT,
     last_updated DATETIME DEFAULT CURRENT_TIMESTAMP
   );
+
+  CREATE TABLE IF NOT EXISTS civics_elections (
+    election_id TEXT PRIMARY KEY,
+    name TEXT,
+    country TEXT,
+    state_or_region TEXT,
+    county_or_district TEXT,
+    city_or_locality TEXT,
+    election_date TEXT,
+    election_type TEXT,
+    election_level TEXT,
+    official_portal_name TEXT,
+    official_portal_url TEXT,
+    source_url TEXT,
+    retrieved_at TEXT,
+    ttl_hours INTEGER,
+    last_verified_at TEXT,
+    confidence_overall TEXT,
+    needs_review INTEGER DEFAULT 0
+  );
+
+  CREATE TABLE IF NOT EXISTS civics_candidates (
+    candidate_id TEXT PRIMARY KEY,
+    name TEXT,
+    office_name TEXT,
+    office_level TEXT,
+    district TEXT,
+    party_affiliation TEXT,
+    incumbent INTEGER,
+    official_website TEXT,
+    social_links TEXT,
+    highlights TEXT,
+    connections TEXT,
+    relevance_score INTEGER,
+    classification_confidence TEXT,
+    source_url TEXT,
+    retrieved_at TEXT,
+    ttl_hours INTEGER,
+    last_verified_at TEXT,
+    needs_review INTEGER DEFAULT 0
+  );
+
+  CREATE TABLE IF NOT EXISTS civics_orgs (
+    org_id TEXT PRIMARY KEY,
+    name TEXT,
+    category TEXT,
+    address TEXT,
+    lat REAL,
+    lon REAL,
+    phone TEXT,
+    email TEXT,
+    website TEXT,
+    services TEXT,
+    source_url TEXT,
+    retrieved_at TEXT,
+    ttl_hours INTEGER,
+    last_verified_at TEXT,
+    confidence_overall TEXT,
+    needs_review INTEGER DEFAULT 0
+  );
+
+  CREATE TABLE IF NOT EXISTS civics_eligibility (
+    key TEXT PRIMARY KEY,
+    country TEXT,
+    state_or_region TEXT,
+    checklist_items TEXT,
+    official_tools TEXT,
+    source_url TEXT,
+    retrieved_at TEXT,
+    ttl_hours INTEGER,
+    last_verified_at TEXT,
+    confidence_overall TEXT
+  );
 `);
 try {
   db.prepare("ALTER TABLE community_items ADD COLUMN retrieved_at TEXT").run();
@@ -731,6 +804,152 @@ function inferGuideFormat(item) {
   if (/checklist|steps|how to/.test(text)) return "checklist";
   if (/program|service|center/.test(text)) return "local_program";
   return "article";
+}
+
+function detectElectionType(text) {
+  const t = text.toLowerCase();
+  if (/(primary)/.test(t)) return "primary";
+  if (/(general election|general)/.test(t)) return "general";
+  if (/(runoff)/.test(t)) return "runoff";
+  if (/(referendum|measure|proposition|ballot measure)/.test(t)) return "referendum";
+  if (/(special election)/.test(t)) return "special";
+  if (/(city|county|municipal|school board|local)/.test(t)) return "local";
+  return "unknown";
+}
+
+function detectElectionLevel(text) {
+  const t = text.toLowerCase();
+  if (/(president|senate|congress|federal|house of representatives)/.test(t)) return "federal";
+  if (/(governor|state senate|state house|statewide)/.test(t)) return "state";
+  if (/(county|commissioner|sheriff|district attorney)/.test(t)) return "county";
+  if (/(city council|mayor|board of education|municipal|local)/.test(t)) return "local";
+  return "all";
+}
+
+function inferCandidateOfficeLevel(text) {
+  const lvl = detectElectionLevel(text);
+  if (lvl === "federal") return "national";
+  return lvl === "all" ? "unknown" : lvl;
+}
+
+function getOfficialElectionTools(stateOrRegion = "") {
+  const s = normalizeText(stateOrRegion).toLowerCase();
+  if (s.includes("north carolina") || s === "nc") {
+    return {
+      portalName: "North Carolina State Board of Elections",
+      portalUrl: "https://www.ncsbe.gov/",
+      tools: [
+        { label: "Check registration / eligibility", url: "https://vt.ncsbe.gov/RegLkup/" },
+        { label: "Find polling place / voting locations", url: "https://vt.ncsbe.gov/PPLkup/" },
+        { label: "Registration portal", url: "https://www.ncsbe.gov/registering/how-register" },
+      ],
+      checklist: [
+        { text: "Confirm registration status before deadlines.", source_url: "https://www.ncsbe.gov/registering/checking-your-registration" },
+        { text: "Review accepted ID requirements for in-person voting.", source_url: "https://www.ncsbe.gov/voting/voter-id" },
+        { text: "Verify county-specific early voting locations and hours.", source_url: "https://www.ncsbe.gov/voting/vote-early-person" },
+      ],
+    };
+  }
+  return {
+    portalName: "Vote.gov",
+    portalUrl: "https://vote.gov/",
+    tools: [
+      { label: "Check registration / eligibility", url: "https://www.usa.gov/confirm-voter-registration" },
+      { label: "Find polling place / voting locations", url: "https://www.usa.gov/find-polling-place" },
+      { label: "Registration portal", url: "https://vote.gov/" },
+    ],
+    checklist: [
+      { text: "Confirm your state registration status.", source_url: "https://www.usa.gov/confirm-voter-registration" },
+      { text: "Check state deadlines for registration and absentee voting.", source_url: "https://vote.gov/" },
+      { text: "Use official state/county tools for polling place details.", source_url: "https://www.usa.gov/find-polling-place" },
+    ],
+  };
+}
+
+function mapItemsToCivics(items = [], { state_or_region = "North Carolina", county_or_district = "", city_or_locality = "" } = {}) {
+  const nowIso = new Date().toISOString();
+  const elections = [];
+  const candidates = [];
+  const orgs = [];
+
+  for (const item of items) {
+    const title = normalizeText(item.title || item.name || "");
+    const description = normalizeText(item.description || "");
+    const combined = `${title} ${description} ${item.type || ""} ${item.category || ""}`;
+    const text = combined.toLowerCase();
+    const sourceUrl = normalizeText(item.source_url || item.url || "");
+    const retrievedAt = item.retrieved_at || nowIso;
+
+    if (/(election|primary|ballot|referendum|vote|voting|runoff)/.test(text)) {
+      const date = normalizeDate(item.date_start || item.election_date || "");
+      elections.push({
+        election_id: item.id || `election-${title.toLowerCase().replace(/\s+/g, "-")}`,
+        name: title || "Election",
+        jurisdiction: {
+          country: "USA",
+          state_or_region: state_or_region || "Unknown",
+          county_or_district: county_or_district || "Unknown",
+          city_or_locality: city_or_locality || "Unknown",
+        },
+        election_date: date ? String(date).slice(0, 10) : null,
+        election_type: detectElectionType(combined),
+        election_level: detectElectionLevel(combined),
+        official_portal_name: getOfficialElectionTools(state_or_region).portalName,
+        official_portal_url: getOfficialElectionTools(state_or_region).portalUrl,
+        source_url: sourceUrl,
+        retrieved_at: retrievedAt,
+        confidence: { overall: date ? "medium" : "low" },
+      });
+    }
+
+    if (/(candidate|running for|for (mayor|council|senate|governor|sheriff|board))/i.test(combined)) {
+      candidates.push({
+        candidate_id: item.id || `candidate-${title.toLowerCase().replace(/\s+/g, "-")}`,
+        name: title.split(" for ")[0] || title || "Candidate",
+        office: {
+          office_name: /for (.+)$/i.test(title) ? (title.match(/for (.+)$/i)?.[1] || "Office") : "Office",
+          level: inferCandidateOfficeLevel(combined),
+          district: county_or_district || "Unknown",
+        },
+        party_affiliation: "Not listed",
+        incumbent: null,
+        campaign_links: { official_website: sourceUrl, social: [] },
+        highlights: [
+          {
+            label: "Platform summary",
+            summary: description || "Not listed",
+            source_url: sourceUrl,
+            retrieved_at: retrievedAt,
+          },
+        ],
+        connections: [],
+        ai_quality: { relevance_score: 70, classification_confidence: "medium" },
+        source_url: sourceUrl,
+        retrieved_at: retrievedAt,
+      });
+    }
+
+    if (/(party|committee|civic|advocacy|democratic|republican|precinct|political action)/.test(text)) {
+      const coords = normalizeCoordinates(item.lat ?? item.latitude, item.lon ?? item.longitude);
+      orgs.push({
+        org_id: item.id || `org-${title.toLowerCase().replace(/\s+/g, "-")}`,
+        name: title || "Civic Organization",
+        category: /student/.test(text) ? "student_org" : /advocacy/.test(text) ? "advocacy_group" : /party|committee/.test(text) ? "party_committee" : "civic_group",
+        address: normalizeText(item.address || item.location_name || "Not listed"),
+        lat: coords?.lat ?? null,
+        lon: coords?.lon ?? null,
+        phone: normalizeText(item.phone || "Not listed"),
+        email: normalizeText(item.email || "Not listed"),
+        website: sourceUrl,
+        services: ["voter_info", "community_events"],
+        source_url: sourceUrl,
+        retrieved_at: retrievedAt,
+        confidence: { overall: coords ? "medium" : "low" },
+      });
+    }
+  }
+
+  return { elections, candidates, parties_and_committees: orgs };
 }
 
 function mapItemsToTranslators(items = [], location = null, radiusMiles = 25, limit = 120) {
@@ -1838,6 +2057,278 @@ async function startServer() {
       guides: local.slice(0, 160),
       notes: [source === "local_db" ? "Loaded from local cache/database first." : "Local-first lookup expanded with online fallback and stored locally."],
       api_sources: [source],
+    });
+  });
+
+  app.post("/api/civics/query", async (req, res) => {
+    const {
+      state_or_region = "North Carolina",
+      county_or_district = "",
+      city_or_locality = "",
+      election_level = "all",
+      election_type = "all",
+      section = "elections",
+      include_past = false,
+      location = null,
+    } = req.body || {};
+
+    const now = new Date();
+    const staleThresholdMs = 48 * 60 * 60 * 1000;
+    const stateNorm = normalizeText(state_or_region);
+    const countyNorm = normalizeText(county_or_district);
+
+    const electionsRows = db.prepare(
+      "SELECT * FROM civics_elections WHERE (? = '' OR lower(state_or_region)=lower(?)) AND (? = '' OR lower(county_or_district)=lower(?))"
+    ).all(stateNorm, stateNorm, countyNorm, countyNorm);
+    const candidatesRows = db.prepare("SELECT * FROM civics_candidates ORDER BY retrieved_at DESC").all();
+    const orgRows = db.prepare("SELECT * FROM civics_orgs ORDER BY retrieved_at DESC").all();
+    const eligibilityKey = `eligibility:${stateNorm.toLowerCase() || 'unknown'}`;
+    const eligibilityRow = db.prepare("SELECT * FROM civics_eligibility WHERE key = ?").get(eligibilityKey);
+
+    let elections = electionsRows.map((r) => ({
+      election_id: r.election_id,
+      name: r.name,
+      jurisdiction: {
+        country: r.country || "USA",
+        state_or_region: r.state_or_region || "",
+        county_or_district: r.county_or_district || "",
+        city_or_locality: r.city_or_locality || "",
+      },
+      election_date: r.election_date,
+      election_type: r.election_type || "unknown",
+      election_level: r.election_level || "all",
+      official_portal_name: r.official_portal_name || "",
+      official_portal_url: r.official_portal_url || "",
+      source_url: r.source_url || "",
+      retrieved_at: r.retrieved_at || "",
+      confidence: { overall: r.confidence_overall || "medium" },
+    }));
+
+    elections = elections.filter((e) => {
+      if (election_type !== "all" && e.election_type !== election_type) return false;
+      if (election_level !== "all" && e.election_level !== election_level) return false;
+      if (!include_past && e.election_date) {
+        const dt = new Date(`${e.election_date}T00:00:00`);
+        if (Number.isFinite(dt.getTime()) && dt < now) return false;
+      }
+      return true;
+    }).sort((a, b) => String(a.election_date || "").localeCompare(String(b.election_date || "")));
+
+    let candidates = candidatesRows.map((r) => ({
+      candidate_id: r.candidate_id,
+      name: r.name,
+      office: {
+        office_name: r.office_name || "Office",
+        level: r.office_level || "unknown",
+        district: r.district || "",
+      },
+      party_affiliation: r.party_affiliation || "Not listed",
+      incumbent: r.incumbent == null ? null : Boolean(r.incumbent),
+      campaign_links: {
+        official_website: r.official_website || "",
+        social: (() => { try { return JSON.parse(r.social_links || "[]"); } catch { return []; } })(),
+      },
+      highlights: (() => { try { return JSON.parse(r.highlights || "[]"); } catch { return []; } })(),
+      connections: (() => { try { return JSON.parse(r.connections || "[]"); } catch { return []; } })(),
+      ai_quality: {
+        relevance_score: Number(r.relevance_score || 0),
+        classification_confidence: r.classification_confidence || "medium",
+      },
+      source_url: r.source_url || "",
+      retrieved_at: r.retrieved_at || "",
+    }));
+
+    if (election_level !== "all") {
+      candidates = candidates.filter((c) =>
+        election_level === "federal" ? c.office.level === "national" : c.office.level === election_level
+      );
+    }
+
+    const partiesAndCommittees = orgRows.map((r) => ({
+      org_id: r.org_id,
+      name: r.name,
+      category: r.category || "other",
+      address: r.address || "Not listed",
+      lat: r.lat ?? null,
+      lon: r.lon ?? null,
+      phone: r.phone || "Not listed",
+      email: r.email || "Not listed",
+      website: r.website || "",
+      services: (() => { try { return JSON.parse(r.services || "[]"); } catch { return []; } })(),
+      source_url: r.source_url || "",
+      retrieved_at: r.retrieved_at || "",
+      confidence: { overall: r.confidence_overall || "medium" },
+    }));
+
+    const baseTools = getOfficialElectionTools(stateNorm);
+    let eligibilityWidget = eligibilityRow
+      ? {
+          jurisdiction: { country: eligibilityRow.country || "USA", state_or_region: eligibilityRow.state_or_region || stateNorm },
+          checklist_items: (() => { try { return JSON.parse(eligibilityRow.checklist_items || "[]"); } catch { return []; } })(),
+          official_tools: (() => { try { return JSON.parse(eligibilityRow.official_tools || "[]"); } catch { return []; } })(),
+          retrieved_at: eligibilityRow.retrieved_at || now.toISOString(),
+          confidence: { overall: eligibilityRow.confidence_overall || "medium" },
+        }
+      : {
+          jurisdiction: { country: "USA", state_or_region: stateNorm || "Unknown" },
+          checklist_items: baseTools.checklist,
+          official_tools: baseTools.tools,
+          retrieved_at: now.toISOString(),
+          confidence: { overall: "high" },
+        };
+
+    const latestRetrieved = [
+      ...elections.map((e) => new Date(e.retrieved_at || 0).getTime()),
+      ...candidates.map((c) => new Date(c.retrieved_at || 0).getTime()),
+      ...partiesAndCommittees.map((o) => new Date(o.retrieved_at || 0).getTime()),
+    ].filter((n) => Number.isFinite(n));
+    const stale = latestRetrieved.length === 0 || (Date.now() - Math.max(...latestRetrieved)) > staleThresholdMs;
+    const insufficient = elections.length === 0 || (section === "candidates" && candidates.length < 2) || (section === "parties" && partiesAndCommittees.length < 2);
+
+    let sourcesUsed = [{ name: "Local DB Cache", url: "local://community.db", retrieved_at: now.toISOString() }];
+
+    if (stale || insufficient) {
+      const query = `upcoming ${election_level} ${election_type} elections ${stateNorm} ${countyNorm} candidates parties committees ballot`;
+      const scraped = await scrapeSources(query, location);
+      const mined = mapItemsToCivics(scraped.results || [], { state_or_region: stateNorm, county_or_district: countyNorm, city_or_locality });
+
+      const eUpsert = db.prepare(`INSERT OR REPLACE INTO civics_elections (election_id,name,country,state_or_region,county_or_district,city_or_locality,election_date,election_type,election_level,official_portal_name,official_portal_url,source_url,retrieved_at,ttl_hours,last_verified_at,confidence_overall,needs_review) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`);
+      const cUpsert = db.prepare(`INSERT OR REPLACE INTO civics_candidates (candidate_id,name,office_name,office_level,district,party_affiliation,incumbent,official_website,social_links,highlights,connections,relevance_score,classification_confidence,source_url,retrieved_at,ttl_hours,last_verified_at,needs_review) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`);
+      const oUpsert = db.prepare(`INSERT OR REPLACE INTO civics_orgs (org_id,name,category,address,lat,lon,phone,email,website,services,source_url,retrieved_at,ttl_hours,last_verified_at,confidence_overall,needs_review) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`);
+
+      const tx = db.transaction(() => {
+        for (const e of mined.elections) {
+          eUpsert.run(
+            e.election_id,
+            e.name,
+            e.jurisdiction.country,
+            e.jurisdiction.state_or_region,
+            e.jurisdiction.county_or_district,
+            e.jurisdiction.city_or_locality,
+            e.election_date,
+            e.election_type,
+            e.election_level || "all",
+            e.official_portal_name,
+            e.official_portal_url,
+            e.source_url || e.official_portal_url,
+            e.retrieved_at || now.toISOString(),
+            48,
+            now.toISOString(),
+            e.confidence?.overall || "medium",
+            e.confidence?.overall === "low" ? 1 : 0
+          );
+        }
+        for (const c of mined.candidates) {
+          cUpsert.run(
+            c.candidate_id,
+            c.name,
+            c.office.office_name,
+            c.office.level,
+            c.office.district,
+            c.party_affiliation,
+            c.incumbent == null ? null : (c.incumbent ? 1 : 0),
+            c.campaign_links.official_website,
+            JSON.stringify(c.campaign_links.social || []),
+            JSON.stringify(c.highlights || []),
+            JSON.stringify(c.connections || []),
+            Number(c.ai_quality?.relevance_score || 0),
+            c.ai_quality?.classification_confidence || "medium",
+            c.source_url || "",
+            c.retrieved_at || now.toISOString(),
+            48,
+            now.toISOString(),
+            c.ai_quality?.classification_confidence === "low" ? 1 : 0
+          );
+        }
+        for (const o of mined.parties_and_committees) {
+          oUpsert.run(
+            o.org_id,
+            o.name,
+            o.category,
+            o.address,
+            o.lat ?? null,
+            o.lon ?? null,
+            o.phone || "Not listed",
+            o.email || "Not listed",
+            o.website || "",
+            JSON.stringify(o.services || []),
+            o.source_url || "",
+            o.retrieved_at || now.toISOString(),
+            72,
+            now.toISOString(),
+            o.confidence?.overall || "medium",
+            o.confidence?.overall === "low" ? 1 : 0
+          );
+        }
+        db.prepare(
+          "INSERT OR REPLACE INTO civics_eligibility (key,country,state_or_region,checklist_items,official_tools,source_url,retrieved_at,ttl_hours,last_verified_at,confidence_overall) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+        ).run(
+          eligibilityKey,
+          "USA",
+          stateNorm,
+          JSON.stringify(baseTools.checklist),
+          JSON.stringify(baseTools.tools),
+          baseTools.portalUrl,
+          now.toISOString(),
+          72,
+          now.toISOString(),
+          "high"
+        );
+      });
+      tx();
+
+      elections = [...elections, ...mined.elections]
+        .filter((v, i, arr) => arr.findIndex((x) => x.election_id === v.election_id) === i)
+        .filter((e) => {
+          if (election_type !== "all" && e.election_type !== election_type) return false;
+          if (election_level !== "all" && e.election_level !== election_level) return false;
+          if (!include_past && e.election_date) {
+            const dt = new Date(`${e.election_date}T00:00:00`);
+            if (Number.isFinite(dt.getTime()) && dt < now) return false;
+          }
+          return true;
+        })
+        .sort((a, b) => String(a.election_date || "").localeCompare(String(b.election_date || "")));
+      candidates = [...candidates, ...mined.candidates].filter((v, i, arr) => arr.findIndex((x) => x.candidate_id === v.candidate_id) === i);
+      if (election_level !== "all") {
+        candidates = candidates.filter((c) => election_level === "federal" ? c.office.level === "national" : c.office.level === election_level);
+      }
+      const mergedOrgs = [...partiesAndCommittees, ...mined.parties_and_committees];
+      const dedupedOrgMap = new Map();
+      for (const o of mergedOrgs) {
+        const key = `${normalizeText(o.name).toLowerCase()}|${normalizeText(o.address).toLowerCase()}`;
+        if (!dedupedOrgMap.has(key)) dedupedOrgMap.set(key, o);
+      }
+      sourcesUsed = [
+        ...sourcesUsed,
+        ...(scraped.notes || []).map((n) => ({ name: "Fallback Source", url: n, retrieved_at: now.toISOString() })),
+      ];
+      eligibilityWidget = {
+        jurisdiction: { country: "USA", state_or_region: stateNorm || "Unknown" },
+        checklist_items: baseTools.checklist,
+        official_tools: baseTools.tools,
+        retrieved_at: now.toISOString(),
+        confidence: { overall: "high" },
+      };
+      return res.json({
+        civics_politics: {
+          elections,
+          candidates,
+          parties_and_committees: [...dedupedOrgMap.values()],
+          eligibility_widget: eligibilityWidget,
+          sources_used: sourcesUsed,
+        },
+      });
+    }
+
+    return res.json({
+      civics_politics: {
+        elections,
+        candidates,
+        parties_and_committees: partiesAndCommittees,
+        eligibility_widget: eligibilityWidget,
+        sources_used: sourcesUsed,
+      },
     });
   });
 

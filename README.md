@@ -5,7 +5,51 @@ Gratitude is a Vite + React + Express app for discovering nearby:
 - Volunteer opportunities
 - Food banks and donation resources
 - Community organizations/services
+- Help & Support resources (clinics, legal aid, shelters, translators/interpreters, newcomer guides)
 - Nearby user connections (simulated local networking)
+
+## Application Summary
+
+Gratitude helps users find local opportunities and support services in one place, with map/list/split browsing and strong source transparency.  
+It prioritizes local/cached data first, then API/scraper sources, and uses AI as a cleanup/classification layer (not as the only data source).
+
+Core product goals:
+- Discover relevant nearby listings quickly
+- Keep source links and timestamps for trust
+- Reduce duplicates and irrelevant items
+- Support language and cultural discovery
+- Keep performance fast with local caching
+
+## How To Use The App
+
+1. Open the app and allow location access (or search by city/ZIP context in queries).
+2. Choose a left sidebar section:
+   - `Events`, `Volunteer Opportunities`, `Food Banks & Donations`, `Organizations`
+   - `Help & Support` (clinics, legal aid, shelters, translators, newcomer guides)
+   - `Connections`, `Saved Items`, `Map`
+3. Use filters shown for the active section (tab-specific).
+4. Switch view mode:
+   - `List` for cards
+   - `Map` for markers
+   - `Split` for map + list together
+5. Save useful items and revisit without re-running every query (local cache + DB cache).
+
+### Help & Support Tab
+
+Inside `Help & Support`, use sub-sections:
+- Clinics
+- Legal Aid
+- Shelters
+- Translators
+- Newcomer Guides
+
+Translator filters include language, service type, mode, specialization, cost, and availability.  
+Newcomer guide filters include language, topic, and content format.
+
+Local-first behavior:
+1. Load from local DB/cache
+2. Expand with fallback sources only when local data is missing/insufficient
+3. Normalize/store results locally for faster next use
 
 ## Prerequisites
 

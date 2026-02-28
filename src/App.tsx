@@ -34,7 +34,7 @@ import { twMerge } from 'tailwind-merge';
 import { MapContainer, TileLayer, Marker, Popup, useMap } from 'react-leaflet';
 import L from 'leaflet';
 import { fetchCommunityData, Location, calculateDistance } from './services/geminiService';
-import { CommunityItem, ConnectionProfile, DirectMessage, CommunityVideo, LocalArtist, TranslatorEntity, NewcomerGuide } from './types';
+import { CommunityItem, ConnectionProfile, DirectMessage, CommunityVideo, LocalArtist, TranslatorEntity, NewcomerGuide, CivicsElection, CivicsCandidate, CivicsOrg } from './types';
 
 // Fix Leaflet icon issue
 const DefaultIcon = L.icon({
@@ -78,7 +78,7 @@ function getSystemPrefersDark(): boolean {
   return window.matchMedia('(prefers-color-scheme: dark)').matches;
 }
 
-type Tab = 'events' | 'volunteer' | 'foodbanks' | 'organizations' | 'clinics_legal' | 'connections' | 'mylist' | 'map_view' | 'all';
+type Tab = 'events' | 'volunteer' | 'foodbanks' | 'organizations' | 'clinics_legal' | 'civics_politics' | 'connections' | 'mylist' | 'map_view' | 'all';
 type Appearance = 'system' | 'light' | 'dark';
 type AccentPreset = 'failover' | 'carolina_blue' | 'custom';
 type AudienceFilter = 'all' | 'student' | 'professional' | 'general' | 'families' | 'seniors';
@@ -86,6 +86,7 @@ type SortBy = 'distance' | 'soonest' | 'newest' | 'relevance';
 type EventWindow = 'upcoming_only' | 'today' | 'this_week' | 'this_month' | 'custom';
 type MapScope = 'radius' | 'viewport';
 type HelpSupportSection = 'clinics' | 'legal_aid' | 'shelters' | 'translators' | 'newcomer_guides';
+type CivicsSection = 'elections' | 'candidates' | 'parties' | 'ballot' | 'saved_topics';
 
 const FAILOVER_ACCENT = '#5A5A40';
 const CAROLINA_BLUE_ACCENT = '#4B9CD3';
@@ -292,6 +293,7 @@ function t(lang: string, key: string) {
       saved: "Saved Items",
       map: "Map (All Categories)",
       settings: "Settings",
+      civics: "Civics & Politics",
       reset: "Reset Filters",
       search: "Search resources...",
       details: "Details",
@@ -343,6 +345,7 @@ function t(lang: string, key: string) {
       saved: "Guardados",
       map: "Mapa (Todas las categorías)",
       settings: "Configuración",
+      civics: "Civismo y Política",
       reset: "Restablecer filtros",
       search: "Buscar recursos...",
       details: "Detalles",
@@ -358,6 +361,7 @@ function t(lang: string, key: string) {
       saved: "موارد ذخیره‌شده",
       map: "نقشه (همه دسته‌ها)",
       settings: "تنظیمات",
+      civics: "امور مدنی و سیاست",
       reset: "بازنشانی فیلترها",
       search: "جستجوی منابع...",
       details: "جزئیات",
@@ -373,6 +377,7 @@ function t(lang: string, key: string) {
       saved: "العناصر المحفوظة",
       map: "الخريطة (كل الفئات)",
       settings: "الإعدادات",
+      civics: "الشؤون المدنية والسياسة",
       reset: "إعادة تعيين الفلاتر",
       search: "ابحث في الموارد...",
       details: "التفاصيل",
@@ -388,6 +393,7 @@ function t(lang: string, key: string) {
       saved: "Éléments enregistrés",
       map: "Carte (toutes catégories)",
       settings: "Paramètres",
+      civics: "Civique et Politique",
       reset: "Réinitialiser les filtres",
       search: "Rechercher des ressources...",
       details: "Détails",
@@ -492,6 +498,16 @@ export default function App() {
   const [newcomerLanguage, setNewcomerLanguage] = useState('');
   const [newcomerTopic, setNewcomerTopic] = useState<'all' | 'documentation' | 'healthcare' | 'housing' | 'education' | 'employment' | 'banking' | 'transportation' | 'legal_rights_general' | 'emergency_services'>('all');
   const [newcomerFormat, setNewcomerFormat] = useState<'any' | 'article' | 'pdf' | 'video' | 'checklist' | 'local_program'>('any');
+  const [civicsSection, setCivicsSection] = useState<CivicsSection>('elections');
+  const [civicsElections, setCivicsElections] = useState<CivicsElection[]>([]);
+  const [civicsCandidates, setCivicsCandidates] = useState<CivicsCandidate[]>([]);
+  const [civicsOrgs, setCivicsOrgs] = useState<CivicsOrg[]>([]);
+  const [civicsEligibility, setCivicsEligibility] = useState<any>(null);
+  const [civicsLoading, setCivicsLoading] = useState(false);
+  const [civicsState, setCivicsState] = useState('North Carolina');
+  const [civicsCounty, setCivicsCounty] = useState('');
+  const [civicsElectionLevel, setCivicsElectionLevel] = useState<'all' | 'federal' | 'state' | 'county' | 'local'>('all');
+  const [civicsElectionType, setCivicsElectionType] = useState<'all' | 'general' | 'primary' | 'local' | 'special' | 'runoff' | 'referendum' | 'unknown'>('all');
   const [interfaceLanguage, setInterfaceLanguage] = useState<string>(() => safeGetLocalStorage('gratitude_interface_language') || 'English');
 
   const [viewMode, setViewMode] = useState<'grid' | 'map' | 'split'>('grid');
@@ -911,6 +927,93 @@ export default function App() {
     }
   };
 
+  const fetchCivicsData = async () => {
+    if (activeTab !== 'civics_politics') return;
+    setCivicsLoading(true);
+    try {
+      const response = await fetch('/api/civics/query', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          state_or_region: civicsState,
+          county_or_district: civicsCounty,
+          election_level: civicsElectionLevel,
+          election_type: civicsElectionType,
+          section: civicsSection,
+          include_past: false,
+          location,
+        }),
+      });
+      const data = await response.json();
+      const civics = data?.civics_politics || {};
+      setCivicsElections(Array.isArray(civics.elections) ? civics.elections : []);
+      setCivicsCandidates(Array.isArray(civics.candidates) ? civics.candidates : []);
+      setCivicsOrgs(Array.isArray(civics.parties_and_committees) ? civics.parties_and_committees : []);
+      setCivicsEligibility(civics.eligibility_widget || null);
+
+      const mapped: CommunityItem[] = [
+        ...(Array.isArray(civics.elections) ? civics.elections : []).map((e: any, idx: number) => ({
+          id: e.election_id || `election-${idx}`,
+          title: e.name || 'Election',
+          description: `${e.election_type || 'unknown'} election in ${e.jurisdiction?.state_or_region || ''}.`,
+          type: 'event',
+          audience: 'general',
+          date_start: e.election_date ? `${e.election_date}T09:00:00` : null,
+          date_end: null,
+          date_unknown: !e.election_date,
+          location_name: e.jurisdiction?.county_or_district || e.jurisdiction?.city_or_locality || 'Not listed',
+          address: e.jurisdiction?.state_or_region || 'Not listed',
+          source_name: e.official_portal_name || 'Official election portal',
+          source_url: e.official_portal_url || '',
+          retrieved_at: e.retrieved_at || new Date().toISOString(),
+          needs_review: e.confidence?.overall === 'low',
+        })),
+        ...(Array.isArray(civics.candidates) ? civics.candidates : []).map((c: any, idx: number) => ({
+          id: c.candidate_id || `candidate-${idx}`,
+          title: c.name || 'Candidate',
+          description: `${c.office?.office_name || 'Office'} (${c.party_affiliation || 'Not listed'})`,
+          type: 'networking',
+          audience: 'general',
+          date_unknown: true,
+          location_name: c.office?.district || 'Not listed',
+          address: c.office?.district || 'Not listed',
+          source_name: 'Candidate listing',
+          source_url: c.campaign_links?.official_website || c.source_url || '',
+          retrieved_at: c.retrieved_at || new Date().toISOString(),
+          needs_review: c.ai_quality?.classification_confidence === 'low',
+        })),
+        ...(Array.isArray(civics.parties_and_committees) ? civics.parties_and_committees : []).map((o: any, idx: number) => ({
+          id: o.org_id || `civics-org-${idx}`,
+          title: o.name || 'Civic Organization',
+          description: `${o.category || 'other'} • ${(o.services || []).join(', ')}`,
+          type: 'resource_center',
+          audience: 'general',
+          date_unknown: true,
+          location_name: o.name || 'Not listed',
+          address: o.address || 'Not listed',
+          lat: o.lat ?? null,
+          lon: o.lon ?? null,
+          latitude: o.lat ?? null,
+          longitude: o.lon ?? null,
+          source_name: 'Civics directory',
+          source_url: o.source_url || '',
+          retrieved_at: o.retrieved_at || new Date().toISOString(),
+          needs_review: o.confidence?.overall === 'low',
+        })),
+      ];
+      setItems(dedupeCommunityItems(mapped));
+      setSummary("Neutral civics data shown from local-first cache and verified sources.");
+    } catch (err) {
+      console.error('Civics fetch failed', err);
+      setCivicsElections([]);
+      setCivicsCandidates([]);
+      setCivicsOrgs([]);
+      setCivicsEligibility(null);
+    } finally {
+      setCivicsLoading(false);
+    }
+  };
+
   const sendAssistantQuery = async () => {
     const text = assistantDraft.trim();
     if (!text) return;
@@ -1135,6 +1238,10 @@ export default function App() {
       case 'map_view':
         query = "Find all nearby events, volunteer opportunities, food assistance, organizations, clinics, shelters, and legal aid resources with coordinates for map display.";
         break;
+      case 'civics_politics':
+        await fetchCivicsData();
+        setLoading(false);
+        return;
       default:
         setLoading(false);
         return;
@@ -1175,7 +1282,7 @@ export default function App() {
   };
 
   useEffect(() => {
-    if (activeTab !== 'mylist' && activeTab !== 'connections') {
+    if (activeTab !== 'mylist' && activeTab !== 'connections' && activeTab !== 'civics_politics') {
       handleSearch(activeTab);
     }
   }, [activeTab, location]);
@@ -1187,6 +1294,12 @@ export default function App() {
     }, 350);
     return () => clearTimeout(timer);
   }, [activeTab, orgCulturalGroupFilter, orgLanguageFilter]);
+
+  useEffect(() => {
+    if (activeTab !== 'civics_politics') return;
+    const timer = setTimeout(() => fetchCivicsData(), 250);
+    return () => clearTimeout(timer);
+  }, [activeTab, civicsSection, civicsState, civicsCounty, civicsElectionLevel, civicsElectionType, location]);
 
   useEffect(() => {
     if (activeTab !== 'clinics_legal') return;
@@ -1744,6 +1857,7 @@ export default function App() {
           <SidebarItem active={activeTab === 'foodbanks'} label={t(interfaceLanguage, 'food')} icon={<ShoppingBasket size={16} />} onClick={() => { setActiveTab('foodbanks'); setSidebarOpen(false); }} />
           <SidebarItem active={activeTab === 'organizations'} label={t(interfaceLanguage, 'organizations')} icon={<Building2 size={16} />} onClick={() => { setActiveTab('organizations'); setSidebarOpen(false); }} />
           <SidebarItem active={activeTab === 'clinics_legal'} label={t(interfaceLanguage, 'clinics')} icon={<Info size={16} />} onClick={() => { setActiveTab('clinics_legal'); setSidebarOpen(false); }} />
+          <SidebarItem active={activeTab === 'civics_politics'} label={t(interfaceLanguage, 'civics')} icon={<Info size={16} />} onClick={() => { setActiveTab('civics_politics'); setSidebarOpen(false); }} />
           <SidebarItem active={activeTab === 'connections'} label={t(interfaceLanguage, 'connections')} icon={<MessageCircle size={16} />} onClick={() => { setActiveTab('connections'); setSidebarOpen(false); }} />
           <SidebarItem active={activeTab === 'mylist'} label={t(interfaceLanguage, 'saved')} icon={<Bookmark size={16} />} onClick={() => { setActiveTab('mylist'); setSidebarOpen(false); }} />
           <SidebarItem active={activeTab === 'map_view'} label={t(interfaceLanguage, 'map')} icon={<MapIcon size={16} />} onClick={() => { setActiveTab('map_view'); setViewMode('split'); setSidebarOpen(false); }} />
@@ -1884,7 +1998,7 @@ export default function App() {
             </div>
           ) : (
             <div className="text-xs uppercase tracking-wider opacity-50 px-1">
-              {activeTab === 'foodbanks' ? 'Food filters' : activeTab === 'clinics_legal' ? 'Help & Support filters' : 'Tab-specific filters'}
+              {activeTab === 'foodbanks' ? 'Food filters' : activeTab === 'clinics_legal' ? 'Help & Support filters' : activeTab === 'civics_politics' ? 'Civics filters' : 'Tab-specific filters'}
             </div>
           )}
 
@@ -2065,6 +2179,48 @@ export default function App() {
                 </select>
               </div>
             )}
+          </div>
+        )}
+
+        {activeTab === 'civics_politics' && (
+          <div className="bg-white/5 p-3 rounded-2xl border border-white/10 space-y-3">
+            <div className="flex flex-wrap gap-2">
+              {[
+                ['elections', 'Elections Near Me'],
+                ['candidates', 'Candidates & Offices'],
+                ['parties', 'Parties & Committees'],
+                ['ballot', 'Ballot & Measures'],
+                ['saved_topics', 'My Saved Topics'],
+              ].map(([key, label]) => (
+                <button
+                  key={key}
+                  onClick={() => setCivicsSection(key as CivicsSection)}
+                  className={cn("px-3 py-1.5 rounded-lg text-xs border border-white/10", civicsSection === key ? "bg-[#5A5A40] text-white" : "bg-white/5")}
+                >
+                  {label}
+                </button>
+              ))}
+            </div>
+            <div className="grid grid-cols-1 md:grid-cols-4 gap-2">
+              <input value={civicsState} onChange={(e) => setCivicsState(e.target.value)} placeholder="State or region" className="px-3 py-2 bg-white/5 border border-white/10 rounded-xl text-sm" />
+              <input value={civicsCounty} onChange={(e) => setCivicsCounty(e.target.value)} placeholder="County or district" className="px-3 py-2 bg-white/5 border border-white/10 rounded-xl text-sm" />
+              <select value={civicsElectionLevel} onChange={(e) => setCivicsElectionLevel(e.target.value as any)} className="px-3 py-2 bg-white/5 border border-white/10 rounded-xl text-sm">
+                <option value="all">All levels</option>
+                <option value="federal">Federal</option>
+                <option value="state">State</option>
+                <option value="county">County</option>
+                <option value="local">Local</option>
+              </select>
+              <select value={civicsElectionType} onChange={(e) => setCivicsElectionType(e.target.value as any)} className="px-3 py-2 bg-white/5 border border-white/10 rounded-xl text-sm">
+                <option value="all">All election types</option>
+                <option value="general">General</option>
+                <option value="primary">Primary</option>
+                <option value="local">Local</option>
+                <option value="special">Special</option>
+                <option value="runoff">Runoff</option>
+                <option value="referendum">Referendum</option>
+              </select>
+            </div>
           </div>
         )}
 
@@ -2359,6 +2515,49 @@ export default function App() {
               ))}
             </div>
           )}
+        </div>
+      )}
+
+      {activeTab === 'civics_politics' && (
+        <div className="mb-6 grid grid-cols-1 xl:grid-cols-2 gap-4">
+          <div className="bg-white/5 border border-white/10 rounded-2xl p-4">
+            <h3 className="font-serif text-2xl mb-3">Elections Near Me (Upcoming)</h3>
+            {civicsLoading ? (
+              <p className="text-sm opacity-60">Loading elections...</p>
+            ) : civicsElections.length === 0 ? (
+              <p className="text-sm opacity-60">No upcoming elections in current filter. Check official portals below.</p>
+            ) : (
+              <div className="space-y-2">
+                {civicsElections.slice(0, 8).map((e) => (
+                  <div key={e.election_id} className="p-3 rounded-xl bg-white/5 border border-white/10">
+                    <p className="font-semibold">{e.name}</p>
+                    <p className="text-xs opacity-70">{e.election_date} • {e.election_type}</p>
+                    <a className="text-xs text-[#5A5A40] underline" href={e.official_portal_url} target="_blank" rel="noreferrer">{e.official_portal_name}</a>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+          <div className="bg-white/5 border border-white/10 rounded-2xl p-4">
+            <h3 className="font-serif text-2xl mb-3">Voting Eligibility & How To Vote</h3>
+            {!civicsEligibility ? (
+              <p className="text-sm opacity-60">Eligibility checklist unavailable. Use official tools below.</p>
+            ) : (
+              <div className="space-y-3">
+                <p className="text-sm opacity-80">{civicsEligibility.jurisdiction?.state_or_region || 'Unknown jurisdiction'}</p>
+                <ul className="text-sm space-y-1">
+                  {(civicsEligibility.checklist_items || []).slice(0, 5).map((it: any, idx: number) => (
+                    <li key={idx} className="opacity-80">• {it.text}</li>
+                  ))}
+                </ul>
+                <div className="flex flex-col gap-1">
+                  {(civicsEligibility.official_tools || []).map((tool: any, idx: number) => (
+                    <a key={idx} className="text-xs text-[#5A5A40] underline" href={tool.url} target="_blank" rel="noreferrer">{tool.label}</a>
+                  ))}
+                </div>
+              </div>
+            )}
+          </div>
         </div>
       )}
 
