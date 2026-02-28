@@ -690,9 +690,10 @@ function inferType(text) {
   if (/(medical school|school of medicine|application|admission|admissions|enrollment|course registration)/.test(t)) {
     return "event";
   }
+  const hasFoodAidContext = /(food|pantry|meal|hunger|nutrition|shelter|relief|mutual aid|supplies|clothing)/.test(t);
   if (/(volunteer|volunteering|serve|community service)/.test(t)) return "volunteer";
   if (/(food bank|food pantry|pantry|meal distribution|soup kitchen|food assistance|grocery support)/.test(t)) return "foodbank";
-  if (/(donation|donate|fundraiser|drive)/.test(t)) return "donation";
+  if (/(donation|donate|donation drive|supply drive|fundraiser)/.test(t) && hasFoodAidContext) return "donation";
   if (/(workshop|bootcamp|training)/.test(t)) return "workshop";
   if (/(class|course|lecture|seminar)/.test(t)) return "class";
   if (/(networking|career fair|meetup|professional)/.test(t)) return "networking";
@@ -715,12 +716,14 @@ function inferAudience(text) {
 
 function inferOrgCategory(text) {
   const t = text.toLowerCase();
+  const hasFoodAidContext = /(food|pantry|meal|hunger|nutrition|shelter|relief|mutual aid|supplies|clothing)/.test(t);
   if (/(medical school|school of medicine|application|admission|admissions|enrollment)/.test(t)) return "other";
   if (/(shelter|housing support|homeless)/.test(t)) return "shelter";
   if (/(legal aid|pro bono|legal clinic)/.test(t)) return "legal_aid";
   if (/(free clinic|health clinic|community clinic|health center|medical aid)/.test(t)) return "free_clinic";
   if (/(law office|attorney|lawyer)/.test(t)) return "lawyer";
   if (/(food pantry|pantry|food assistance|meal|soup kitchen|grocery support)/.test(t)) return "food_assistance";
+  if (/(donation|donate|donation drive|supply drive)/.test(t) && hasFoodAidContext) return "food_assistance";
   if (/(resource center|community center|support services|crisis|immigration|domestic violence)/.test(t)) return "resource_center";
   return "other";
 }
@@ -804,6 +807,17 @@ function inferGuideFormat(item) {
   if (/checklist|steps|how to/.test(text)) return "checklist";
   if (/program|service|center/.test(text)) return "local_program";
   return "article";
+}
+
+function hasStrictFoodContext(text) {
+  const t = String(text || "").toLowerCase();
+  return /(food bank|food pantry|pantry|meal|soup kitchen|food assistance|grocery support|hunger|nutrition|supply drive|mutual aid|relief)/.test(t);
+}
+
+function hasStrictClinicLegalContext(text) {
+  const t = String(text || "").toLowerCase();
+  if (/(medical school|application|admission|course|training only)/.test(t)) return false;
+  return /(clinic|health center|vaccination|medical aid|urgent care|legal aid|pro bono|attorney|lawyer|shelter|crisis support|domestic violence|immigration legal)/.test(t);
 }
 
 function detectElectionType(text) {
@@ -1340,12 +1354,14 @@ function jaccardSimilarity(a, b) {
 
 function inferPrimaryCategory(item) {
   const text = `${item.title || ""} ${item.description || ""} ${item.type || ""} ${item.category || ""}`.toLowerCase();
+  const hasFoodAidContext = /(food|pantry|meal|hunger|nutrition|shelter|relief|mutual aid|supplies|clothing)/.test(text);
   if (/(spam|advertisement|limited time offer|coupon|buy now|promo code)/.test(text)) return "other";
   if (/(artist|band|musician|gallery|performance|photographer|painter)/.test(text)) return "artist";
   if (/(translation|language support|esl|interpretation)/.test(text)) return "language_support";
   if (/(cultural|heritage|festival|community center|cultural center)/.test(text)) return "cultural";
   if (/(clinic|legal aid|attorney|lawyer|pro bono|shelter|crisis support)/.test(text)) return "clinic_legal";
-  if (/(food bank|pantry|meal|donation|food assistance)/.test(text) || item.type === "foodbank" || item.type === "donation") return "food_assistance";
+  if (/(food bank|pantry|meal|food assistance)/.test(text) || item.type === "foodbank") return "food_assistance";
+  if ((/(donation|donate|donation drive|supply drive)/.test(text) && hasFoodAidContext) || (item.type === "donation" && hasFoodAidContext)) return "food_assistance";
   if (item.type === "volunteer" || /(volunteer|community service)/.test(text)) return "volunteer";
   if (/(organization|nonprofit|association|resource center)/.test(text)) return "organization";
   if (/(workshop|class|lecture|training|course)/.test(text)) return "education";
@@ -1532,8 +1548,33 @@ async function runQualityPipeline(items, { hideLowRelevance = true } = {}) {
     };
   });
 
+  const guarded = merged.map((item) => {
+    const text = `${item.title || ""} ${item.description || ""} ${item.source_name || ""}`.toLowerCase();
+    if (item.primary_category === "food_assistance" && !hasStrictFoodContext(text)) {
+      return {
+        ...item,
+        primary_category: "event",
+        subcategory: "event",
+        type: "event",
+        needs_review: true,
+        classification_confidence: "low",
+      };
+    }
+    if (item.primary_category === "clinic_legal" && !hasStrictClinicLegalContext(text)) {
+      return {
+        ...item,
+        primary_category: "organization",
+        subcategory: "resource",
+        type: "resource_center",
+        needs_review: true,
+        classification_confidence: "low",
+      };
+    }
+    return item;
+  });
+
   const dedupeKeep = [];
-  for (const item of merged) {
+  for (const item of guarded) {
     const day = item.date_start ? String(item.date_start).slice(0, 10) : "unknown";
     const venue = normalizeText(item.location_name || item.address).toLowerCase();
     let duplicateOf = null;
@@ -2401,6 +2442,24 @@ async function startServer() {
       const reclassified = await runQualityPipeline(normalizedItems, { hideLowRelevance: true });
       normalizedItems = reclassified;
     }
+
+    // Hard tab-level guardrails to prevent cross-category leakage from legacy labels.
+    if (tab === "foodbanks") {
+      normalizedItems = normalizedItems.filter((item) => {
+        const text = `${item.title || ""} ${item.description || ""} ${item.type || ""}`.toLowerCase();
+        return (item.type === "foodbank") || (item.type === "donation" && hasStrictFoodContext(text)) || hasStrictFoodContext(text);
+      });
+    } else if (tab === "clinics_legal") {
+      normalizedItems = normalizedItems.filter((item) => {
+        const text = `${item.title || ""} ${item.description || ""} ${item.type || ""}`.toLowerCase();
+        return ["clinic", "legal_aid", "shelter"].includes(String(item.type || "").toLowerCase()) || hasStrictClinicLegalContext(text);
+      });
+    } else if (tab === "events") {
+      normalizedItems = normalizedItems.filter((item) => ["event", "class", "workshop", "networking", "support_group"].includes(String(item.type || "").toLowerCase()));
+    } else if (tab === "volunteer") {
+      normalizedItems = normalizedItems.filter((item) => String(item.type || "").toLowerCase() === "volunteer");
+    }
+
     const cache = db.prepare("SELECT summary FROM search_cache WHERE tab = ?").get(tab);
     res.json({ items: normalizedItems, summary: cache?.summary || "" });
   });
@@ -2509,6 +2568,66 @@ async function startServer() {
     db.prepare("DELETE FROM community_items").run();
     db.prepare("DELETE FROM search_cache").run();
     res.json({ status: "ok" });
+  });
+
+  app.post("/api/reclassify-all", async (_req, res) => {
+    const rows = db.prepare("SELECT * FROM community_items").all();
+    if (rows.length === 0) {
+      return res.json({ status: "ok", updated: 0 });
+    }
+
+    const items = rows.map((r) => ({
+      id: r.id,
+      title: r.title,
+      description: r.description,
+      location_name: r.location_name,
+      address: r.address,
+      date_start: r.date_start,
+      date_end: r.date_end,
+      type: r.type,
+      category: r.category,
+      audience: r.audience,
+      lat: r.latitude,
+      lon: r.longitude,
+      source_name: r.source_name,
+      source_url: r.source_url,
+      retrieved_at: r.retrieved_at,
+      needs_review: Boolean(r.needs_review),
+      user_reports: Number(r.user_reports || 0),
+      report_types: (() => { try { return JSON.parse(r.report_types || "[]"); } catch { return []; } })(),
+    }));
+
+    const classified = await runQualityPipeline(items, { hideLowRelevance: false });
+    const update = db.prepare(`
+      UPDATE community_items
+      SET type = ?, audience = ?, needs_review = ?, primary_category = ?, subcategory = ?, ai_tags = ?, relevance_score = ?, quality_score = ?,
+          classification_confidence = ?, low_relevance = ?, low_quality = ?, source_category = ?, duplicate_of = ?, classification_checked_at = ?, last_updated = CURRENT_TIMESTAMP
+      WHERE id = ?
+    `);
+    const tx = db.transaction((list) => {
+      for (const it of list) {
+        update.run(
+          it.type || "event",
+          it.audience || "general",
+          it.needs_review ? 1 : 0,
+          it.primary_category || null,
+          it.subcategory || null,
+          JSON.stringify(it.ai_tags || []),
+          Number.isFinite(Number(it.relevance_score)) ? Number(it.relevance_score) : null,
+          Number.isFinite(Number(it.quality_score)) ? Number(it.quality_score) : null,
+          it.classification_confidence || null,
+          it.low_relevance ? 1 : 0,
+          it.low_quality ? 1 : 0,
+          it.source_category || null,
+          it.duplicate_of || null,
+          it.classification_checked_at || new Date().toISOString(),
+          it.id
+        );
+      }
+    });
+    tx(classified);
+
+    return res.json({ status: "ok", updated: classified.length });
   });
 
   app.post("/api/connections/search", (req, res) => {

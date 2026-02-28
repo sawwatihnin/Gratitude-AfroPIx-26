@@ -92,6 +92,7 @@ const FAILOVER_ACCENT = '#5A5A40';
 const CAROLINA_BLUE_ACCENT = '#4B9CD3';
 const CURRENT_USER_ID = 'user_me';
 const LOCAL_CACHE_KEY = 'gratitude_tab_cache_v1';
+const SAVED_ITEMS_KEY = 'gratitude_saved_items_v2';
 const VIDEO_CACHE_KEY = 'gratitude_video_cache_v1';
 const ARTIST_CACHE_KEY = 'gratitude_artist_cache_v1';
 
@@ -117,6 +118,22 @@ function dedupeCommunityItems(list: CommunityItem[]): CommunityItem[] {
     if (seen.has(key)) continue;
     seen.add(key);
     out.push(item);
+  }
+  return out;
+}
+
+function sanitizeSavedItems(list: any[]): CommunityItem[] {
+  if (!Array.isArray(list)) return [];
+  const seen = new Set<string>();
+  const out: CommunityItem[] = [];
+  for (const raw of list) {
+    if (!raw || typeof raw !== 'object') continue;
+    const id = String(raw.id || '');
+    const title = String(raw.title || raw.name || '').trim();
+    if (!id || !title) continue;
+    if (seen.has(id)) continue;
+    seen.add(id);
+    out.push(raw as CommunityItem);
   }
   return out;
 }
@@ -245,10 +262,14 @@ function textSignals(item: CommunityItem) {
 
 function isFoodItem(item: CommunityItem) {
   const t = textSignals(item);
+  const hasFoodAidContext = /(food bank|food pantry|pantry|meal|soup kitchen|food assistance|grocery support|nutrition|hunger|relief|mutual aid|shelter|clothing|supplies)/.test(t);
+  const isDonationType = (item.type || '').toLowerCase() === 'donation';
   return (
-    ['foodbank', 'donation'].includes((item.type || '').toLowerCase()) ||
+    (item.type || '').toLowerCase() === 'foodbank' ||
+    (isDonationType && hasFoodAidContext) ||
     (item.category || '').toLowerCase() === 'food_assistance' ||
-    /(food bank|food pantry|pantry|meal|soup kitchen|donation|donate|food assistance|grocery support)/.test(t)
+    /(food bank|food pantry|pantry|meal|soup kitchen|food assistance|grocery support|hunger relief)/.test(t) ||
+    (/(donation|donate|donation drive|supply drive)/.test(t) && hasFoodAidContext)
   );
 }
 
@@ -266,6 +287,50 @@ function isClinicLegalItem(item: CommunityItem) {
 
 function isEventLikeType(type?: string) {
   return ['event', 'workshop', 'class', 'networking', 'support_group'].includes((type || '').toLowerCase());
+}
+
+function isVolunteerItem(item: CommunityItem) {
+  const text = `${item.title || ''} ${item.description || ''} ${item.type || ''}`.toLowerCase();
+  return (item.type || '').toLowerCase() === 'volunteer' || /(volunteer|community service|serve)/.test(text);
+}
+
+function isOrganizationItem(item: CommunityItem) {
+  const t = (item.type || '').toLowerCase();
+  const c = (item.category || '').toLowerCase();
+  const text = `${item.title || ''} ${item.description || ''}`.toLowerCase();
+  return (
+    ['organization', 'resource_center', 'shelter', 'legal_aid', 'clinic'].includes(t) ||
+    ['resource_center', 'other', 'food_assistance', 'lawyer', 'legal_aid', 'free_clinic', 'shelter'].includes(c) ||
+    /(organization|nonprofit|community center|resource center|association)/.test(text)
+  );
+}
+
+function isCivicsItem(item: CommunityItem) {
+  const id = String(item.id || '').toLowerCase();
+  const source = String(item.source_name || '').toLowerCase();
+  const text = `${item.title || ''} ${item.description || ''}`.toLowerCase();
+  return (
+    id.startsWith('election-') ||
+    id.startsWith('candidate-') ||
+    id.startsWith('civics-org-') ||
+    source.includes('civic') ||
+    source.includes('election portal') ||
+    /(election|candidate|ballot|referendum|voter|voting|committee|civic)/.test(text)
+  );
+}
+
+function filterItemsForTab(tab: Tab, list: CommunityItem[], helpSupportSection: HelpSupportSection): CommunityItem[] {
+  if (!Array.isArray(list)) return [];
+  if (tab === 'events') return list.filter((item) => isEventLikeType(item.type));
+  if (tab === 'volunteer') return list.filter((item) => isVolunteerItem(item));
+  if (tab === 'foodbanks') return list.filter((item) => isFoodItem(item));
+  if (tab === 'organizations') return list.filter((item) => isOrganizationItem(item));
+  if (tab === 'clinics_legal') {
+    if (helpSupportSection === 'translators' || helpSupportSection === 'newcomer_guides') return [];
+    return list.filter((item) => isClinicLegalItem(item));
+  }
+  if (tab === 'civics_politics') return list.filter((item) => isCivicsItem(item));
+  return list;
 }
 
 function prunePastEvents(items: CommunityItem[]) {
@@ -521,11 +586,10 @@ export default function App() {
   const [summary, setSummary] = useState<string>("");
   const [selectedItem, setSelectedItem] = useState<CommunityItem | null>(null);
   const [myList, setMyList] = useState<CommunityItem[]>(() => {
-    const saved = safeGetLocalStorage('communitree_list');
+    const saved = safeGetLocalStorage(SAVED_ITEMS_KEY) || safeGetLocalStorage('communitree_list');
     if (!saved) return [];
     try {
-      const parsed = JSON.parse(saved);
-      return Array.isArray(parsed) ? parsed : [];
+      return sanitizeSavedItems(JSON.parse(saved));
     } catch {
       return [];
     }
@@ -622,7 +686,7 @@ export default function App() {
   }, [appearance, accentPreset, accentCustomHex, resolvedAppearance, appliedAccentColor, highContrast, largeTextMode, reducedMotion, screenReaderLabels, interfaceLanguage]);
 
   useEffect(() => {
-    safeSetLocalStorage('communitree_list', JSON.stringify(myList));
+    safeSetLocalStorage(SAVED_ITEMS_KEY, JSON.stringify(sanitizeSavedItems(myList)));
   }, [myList]);
 
   useEffect(() => {
@@ -640,10 +704,26 @@ export default function App() {
         },
         (err) => {
           console.error("Geolocation error:", err);
-          setError("Please enable location access to find nearby community resources.");
+          // Non-blocking fallback so tabs (especially connections) still have usable local results.
+          setLocation({ latitude: 35.9132, longitude: -79.0558 });
+          setSummary("Location permission unavailable. Showing results near Chapel Hill, NC by default.");
         }
       );
     }
+  }, []);
+
+  useEffect(() => {
+    const last = Number(safeGetLocalStorage('gratitude_reclassify_last_run') || 0);
+    const oneDay = 24 * 60 * 60 * 1000;
+    if (Date.now() - last < oneDay) return;
+    (async () => {
+      try {
+        await fetch('/api/reclassify-all', { method: 'POST' });
+        safeSetLocalStorage('gratitude_reclassify_last_run', String(Date.now()));
+      } catch {
+        // Best effort only.
+      }
+    })();
   }, []);
 
   const CONNECTION_PAGE_SIZE = 8;
@@ -1191,9 +1271,10 @@ export default function App() {
       const localCache = readLocalTabCache(tab);
       if (localCache && localCache.items.length > 0) {
         const cached = dedupeCommunityItems(tab === 'events' ? prunePastEvents(localCache.items) : localCache.items);
-        setItems(cached);
+        const tabClean = dedupeCommunityItems(filterItemsForTab(tab, cached, helpSupportSection));
         setSummary(normalizeSummary(localCache.summary));
-        hydrateCoordinates(cached, tab);
+        setItems(tabClean);
+        hydrateCoordinates(tabClean, tab);
         setLoading(false);
         return;
       }
@@ -1202,11 +1283,12 @@ export default function App() {
         const cachedData = await cachedResponse.json();
         if (cachedData.items && cachedData.items.length > 0) {
           const dedupedCached = dedupeCommunityItems(tab === 'events' ? prunePastEvents(cachedData.items) : cachedData.items);
-          setItems(dedupedCached);
+          const tabClean = dedupeCommunityItems(filterItemsForTab(tab, dedupedCached, helpSupportSection));
           const clean = normalizeSummary(cachedData.summary || '');
           setSummary(clean);
-          writeLocalTabCache(tab, dedupedCached, clean);
-          hydrateCoordinates(dedupedCached, tab);
+          setItems(tabClean);
+          writeLocalTabCache(tab, tabClean, clean);
+          hydrateCoordinates(tabClean, tab);
           setLoading(false);
           return;
         }
@@ -1252,18 +1334,19 @@ export default function App() {
       const mappedItems: CommunityItem[] = mapPayloadToItems(tab, data);
       
       const dedupedMapped = dedupeCommunityItems(mappedItems);
-      setItems(dedupedMapped);
+      const tabClean = dedupeCommunityItems(filterItemsForTab(tab, dedupedMapped, helpSupportSection));
+      setItems(tabClean);
       const cleanedSummary = normalizeSummary(data.summary || '');
       setSummary(cleanedSummary);
-      writeLocalTabCache(tab, dedupedMapped, cleanedSummary);
-      hydrateCoordinates(dedupedMapped, tab);
+      writeLocalTabCache(tab, tabClean, cleanedSummary);
+      hydrateCoordinates(tabClean, tab);
 
       // Save to server-side cache
       await fetch('/api/items', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ 
-          items: dedupedMapped.slice(0, 1200),
+          items: tabClean.slice(0, 1200),
           organizations: [],
           summary: cleanedSummary,
           tab 
@@ -1419,6 +1502,25 @@ export default function App() {
   const applyFilters = (list: CommunityItem[]) => {
     let filtered = [...list];
 
+    // Hard tab-level relevance gate: prevent cross-category leakage.
+    if (activeTab === 'events') {
+      filtered = filtered.filter((item) => isEventLikeType(item.type));
+    } else if (activeTab === 'volunteer') {
+      filtered = filtered.filter((item) => isVolunteerItem(item));
+    } else if (activeTab === 'foodbanks') {
+      filtered = filtered.filter((item) => isFoodItem(item));
+    } else if (activeTab === 'organizations') {
+      filtered = filtered.filter((item) => isOrganizationItem(item));
+    } else if (activeTab === 'clinics_legal') {
+      if (helpSupportSection === 'translators' || helpSupportSection === 'newcomer_guides') {
+        filtered = [];
+      } else {
+        filtered = filtered.filter((item) => isClinicLegalItem(item));
+      }
+    } else if (activeTab === 'civics_politics') {
+      filtered = filtered.filter((item) => isCivicsItem(item));
+    }
+
     // Search Query
     if (searchQuery) {
       const q = searchQuery.toLowerCase();
@@ -1507,19 +1609,13 @@ export default function App() {
         });
       }
     }
-    if (activeTab === 'clinics_legal') {
-      if (helpSupportSection === 'translators' || helpSupportSection === 'newcomer_guides') {
-        filtered = [];
-      } else {
-        filtered = filtered.filter((item) => isClinicLegalItem(item));
-      }
-    }
-
-    if (activeTab === 'foodbanks') {
-      filtered = filtered.filter((item) => isFoodItem(item));
-      if (foodTypeFilter !== 'all') {
-        filtered = filtered.filter((item) => (item.type || '').toLowerCase() === foodTypeFilter);
-      }
+    if (activeTab === 'foodbanks' && foodTypeFilter !== 'all') {
+      filtered = filtered.filter((item) => {
+        const type = (item.type || '').toLowerCase();
+        if (foodTypeFilter === 'foodbank') return type === 'foodbank';
+        if (foodTypeFilter === 'donation') return type === 'donation' && isFoodItem(item);
+        return true;
+      });
     }
 
     if (activeTab === 'clinics_legal' && clinicServiceFilter !== 'all') {
