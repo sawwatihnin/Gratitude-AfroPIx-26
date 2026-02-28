@@ -21,6 +21,26 @@ Communitree is a Vite + React + Express app for discovering local community reso
 2. Open `.env` and set:
    - `GEMINI_API_KEY` (required for Gemini requests)
    - `OPENAI_API_KEY` (optional failover)
+   - `SCRAPER_SOURCES` (recommended deterministic fallback feeds)
+   - `SCRAPER_TIMEOUT_MS` (optional per-source timeout)
+
+### Deterministic Scraper Fallback (AI-off mode)
+
+When AI is unavailable, the app now falls back automatically to a deterministic web-scraper pipeline:
+1. Gemini
+2. OpenAI failover
+3. `/api/scrape-fallback` (RSS/Atom/ICS sources, rule-based classification + dedupe)
+
+Configure `SCRAPER_SOURCES` in `.env`:
+```env
+SCRAPER_SOURCES="City Calendar|https://your-city.gov/events.rss,University Calendar|https://calendar.yourschool.edu/events.ics"
+SCRAPER_TIMEOUT_MS=10000
+```
+
+Notes:
+- Add multiple high-quality official feeds for best coverage.
+- Fallback scraper classifies type/audience with deterministic keyword rules.
+- Source URL provenance is retained per listing.
 
 ## Run Locally (Cross-Platform)
 

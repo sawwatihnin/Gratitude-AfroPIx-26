@@ -1,6 +1,12 @@
 import { GoogleGenAI } from "@google/genai";
 
-const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
+function getGeminiClient(): GoogleGenAI | null {
+  const apiKey = (typeof process !== "undefined" && process.env?.GEMINI_API_KEY) || "";
+  if (!apiKey) {
+    return null;
+  }
+  return new GoogleGenAI({ apiKey });
+}
 
 export interface Location {
   latitude: number;
@@ -137,6 +143,11 @@ Current Time: ${new Date().toISOString()}.
 Query: ${query}`;
 
   try {
+    const ai = getGeminiClient();
+    if (!ai) {
+      throw new Error("Gemini API key is missing");
+    }
+
     const response = await ai.models.generateContent({
       model,
       contents: refinedQuery,
@@ -212,6 +223,29 @@ Query: ${query}`;
       }
     } catch (failoverError) {
       console.error("OpenAI Failover failed:", failoverError);
+    }
+
+    // Deterministic scraper fallback
+    console.warn("AI failovers unavailable, trying deterministic scraper fallback...");
+    try {
+      const scraperResponse = await fetch("/api/scrape-fallback", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ query, location })
+      });
+
+      if (scraperResponse.ok) {
+        const data = await scraperResponse.json();
+        return {
+          items: data.results || [],
+          organizations: data.organizations || [],
+          summary: data.notes?.join(" ") || "Deterministic scraper fallback results.",
+          notes: data.notes || [],
+          groundingChunks: []
+        };
+      }
+    } catch (scraperError) {
+      console.error("Scraper fallback failed:", scraperError);
     }
     
     console.error("Error fetching community data:", error);
