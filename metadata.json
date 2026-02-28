@@ -1,0 +1,5 @@
+{
+  "name": "Communitree",
+  "description": "A community-focused app to find local events, volunteering opportunities, and food banks near you.",
+  "requestFramePermissions": ["geolocation"]
+}
