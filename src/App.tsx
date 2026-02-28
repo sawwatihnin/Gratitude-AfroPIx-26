@@ -729,13 +729,7 @@ export default function App() {
   const CONNECTION_PAGE_SIZE = 8;
 
   const fetchConnections = async (page = connectionPage) => {
-    if (!location) {
-      setConnections([]);
-      setConnectionTotal(0);
-      setConnectionNotes(["Enable location access or provide your city/ZIP to discover nearby users."]);
-      return;
-    }
-
+    const effectiveLocation = location || { latitude: 35.9132, longitude: -79.0558 };
     setConnectionsLoading(true);
     setConnectionsError(null);
     try {
@@ -744,7 +738,7 @@ export default function App() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           current_user_id: CURRENT_USER_ID,
-          location,
+          location: effectiveLocation,
           page,
           page_size: CONNECTION_PAGE_SIZE,
           filters: {
@@ -764,10 +758,16 @@ export default function App() {
       const data = await response.json();
       setConnections(data.connections || []);
       setConnectionTotal(data.total || 0);
-      setConnectionNotes(data.notes || []);
+      const baseNotes = Array.isArray(data.notes) ? data.notes : [];
+      setConnectionNotes(
+        location
+          ? baseNotes
+          : ["Location unavailable. Showing nearby users around Chapel Hill by default.", ...baseNotes]
+      );
     } catch (err) {
       console.error('Connections search failed', err);
       setConnectionsError('Failed to load nearby users.');
+      setConnectionNotes(["Connection service temporarily unavailable. Try Refresh in a few seconds."]);
     } finally {
       setConnectionsLoading(false);
     }

@@ -966,6 +966,86 @@ function mapItemsToCivics(items = [], { state_or_region = "North Carolina", coun
   return { elections, candidates, parties_and_committees: orgs };
 }
 
+function dedupeByKey(rows, keyFn) {
+  const map = new Map();
+  for (const row of rows || []) {
+    const key = keyFn(row);
+    if (!key) continue;
+    if (!map.has(key)) map.set(key, row);
+  }
+  return [...map.values()];
+}
+
+function buildEligibilityFromItems(items = [], baseTools) {
+  const candidates = [];
+  for (const item of items || []) {
+    const text = `${normalizeText(item.title || "")}. ${normalizeText(item.description || "")}`;
+    const source = normalizeText(item.source_url || item.url || baseTools.portalUrl);
+    const lowered = text.toLowerCase();
+    if (/(registration|register to vote|voter registration)/.test(lowered)) {
+      candidates.push({ text: normalizeText(text).slice(0, 180), source_url: source });
+    }
+    if (/(eligibility|who can vote|requirements|residency|id requirement)/.test(lowered)) {
+      candidates.push({ text: normalizeText(text).slice(0, 180), source_url: source });
+    }
+    if (/(polling place|vote center|early voting|absentee|mail ballot)/.test(lowered)) {
+      candidates.push({ text: normalizeText(text).slice(0, 180), source_url: source });
+    }
+  }
+  const merged = dedupeByKey(candidates, (c) => `${c.text.toLowerCase()}|${c.source_url.toLowerCase()}`).slice(0, 8);
+  if (merged.length > 0) return merged;
+  return baseTools.checklist;
+}
+
+async function aiExtractCivicsFromItems(items, { state_or_region = "Unknown", county_or_district = "", city_or_locality = "" } = {}) {
+  const apiKey = process.env.OPENAI_API_KEY;
+  if (!apiKey || !Array.isArray(items) || items.length === 0) {
+    return { elections: [], candidates: [], parties_and_committees: [], eligibility_items: [] };
+  }
+  const openai = new OpenAI({ apiKey });
+  const compact = items.slice(0, 140).map((item, index) => ({
+    index,
+    title: normalizeText(item.title || item.name || ""),
+    description: normalizeText(item.description || ""),
+    source_name: normalizeText(item.source_name || ""),
+    source_url: normalizeText(item.source_url || item.url || ""),
+    date_start: normalizeDate(item.date_start || item.start || ""),
+    location_name: normalizeText(item.location_name || ""),
+    address: normalizeText(item.address || ""),
+  }));
+  try {
+    const completion = await openai.chat.completions.create({
+      model: "gpt-4o-mini",
+      temperature: 0.1,
+      response_format: { type: "json_object" },
+      messages: [
+        {
+          role: "system",
+          content:
+            "Extract civics information neutrally and factually. Do not invent facts. Every claim must include source_url and retrieved_at. Return JSON only with shape: {elections:[{name,election_date,election_type,election_level,official_portal_name,official_portal_url,source_url,retrieved_at,confidence}],candidates:[{name,office_name,office_level,district,party_affiliation,incumbent,campaign_links:{official_website,social},highlights:[{label,summary,source_url,retrieved_at}],connections:[{type,entity_name,summary,source_url,retrieved_at}],ai_quality:{relevance_score,classification_confidence},source_url,retrieved_at}],parties_and_committees:[{name,category,address,lat,lon,phone,email,website,services,source_url,retrieved_at,confidence}],eligibility_items:[{text,source_url}]}. Use neutral language only.",
+        },
+        {
+          role: "user",
+          content: JSON.stringify({
+            jurisdiction: { state_or_region, county_or_district, city_or_locality, country: "USA" },
+            listings: compact,
+          }),
+        },
+      ],
+    });
+    const content = completion.choices?.[0]?.message?.content || "{}";
+    const parsed = JSON.parse(String(content).replace(/```json|```/gi, "").trim() || "{}");
+    return {
+      elections: Array.isArray(parsed.elections) ? parsed.elections : [],
+      candidates: Array.isArray(parsed.candidates) ? parsed.candidates : [],
+      parties_and_committees: Array.isArray(parsed.parties_and_committees) ? parsed.parties_and_committees : [],
+      eligibility_items: Array.isArray(parsed.eligibility_items) ? parsed.eligibility_items : [],
+    };
+  } catch {
+    return { elections: [], candidates: [], parties_and_committees: [], eligibility_items: [] };
+  }
+}
+
 function mapItemsToTranslators(items = [], location = null, radiusMiles = 25, limit = 120) {
   const out = [];
   const seen = new Set();
@@ -2114,7 +2194,7 @@ async function startServer() {
     } = req.body || {};
 
     const now = new Date();
-    const staleThresholdMs = 48 * 60 * 60 * 1000;
+    const staleThresholdMs = 24 * 60 * 60 * 1000;
     const stateNorm = normalizeText(state_or_region);
     const countyNorm = normalizeText(county_or_district);
 
@@ -2229,16 +2309,90 @@ async function startServer() {
     let sourcesUsed = [{ name: "Local DB Cache", url: "local://community.db", retrieved_at: now.toISOString() }];
 
     if (stale || insufficient) {
-      const query = `upcoming ${election_level} ${election_type} elections ${stateNorm} ${countyNorm} candidates parties committees ballot`;
-      const scraped = await scrapeSources(query, location);
-      const mined = mapItemsToCivics(scraped.results || [], { state_or_region: stateNorm, county_or_district: countyNorm, city_or_locality });
+      const primaryQuery = `upcoming ${election_level} ${election_type} elections ${stateNorm} ${countyNorm} candidates parties committees ballot measures`;
+      const eligibilityQuery = `voter registration eligibility polling place early voting absentee ballot ${stateNorm} ${countyNorm}`;
+      const [scrapedPrimary, scrapedEligibility] = await Promise.all([
+        scrapeSources(primaryQuery, location),
+        scrapeSources(eligibilityQuery, location),
+      ]);
+      const baseMined = mapItemsToCivics(scrapedPrimary.results || [], { state_or_region: stateNorm, county_or_district: countyNorm, city_or_locality });
+      const aiMined = await aiExtractCivicsFromItems(scrapedPrimary.results || [], {
+        state_or_region: stateNorm,
+        county_or_district: countyNorm,
+        city_or_locality,
+      });
+      const mergedElections = dedupeByKey(
+        [...baseMined.elections, ...(aiMined.elections || []).map((e, idx) => ({
+          election_id: e.election_id || `ai-election-${idx}-${normalizeText(e.name || "election").toLowerCase().replace(/\s+/g, "-")}`,
+          name: normalizeText(e.name || "Election"),
+          jurisdiction: {
+            country: "USA",
+            state_or_region: stateNorm || "Unknown",
+            county_or_district: countyNorm || "Unknown",
+            city_or_locality: city_or_locality || "Unknown",
+          },
+          election_date: normalizeText(e.election_date || ""),
+          election_type: e.election_type || detectElectionType(`${e.name || ""}`),
+          election_level: e.election_level || detectElectionLevel(`${e.name || ""}`),
+          official_portal_name: normalizeText(e.official_portal_name || baseTools.portalName),
+          official_portal_url: normalizeText(e.official_portal_url || baseTools.portalUrl),
+          source_url: normalizeText(e.source_url || e.official_portal_url || baseTools.portalUrl),
+          retrieved_at: e.retrieved_at || now.toISOString(),
+          confidence: { overall: e.confidence?.overall || "medium" },
+        }))],
+        (e) => normalizeText(e.election_id || `${e.name}|${e.election_date}|${e.election_type}`).toLowerCase()
+      );
+      const mergedCandidates = dedupeByKey(
+        [...baseMined.candidates, ...(aiMined.candidates || []).map((c, idx) => ({
+          candidate_id: c.candidate_id || `ai-candidate-${idx}-${normalizeText(c.name || "candidate").toLowerCase().replace(/\s+/g, "-")}`,
+          name: normalizeText(c.name || "Candidate"),
+          office: {
+            office_name: normalizeText(c.office_name || c.office?.office_name || "Office"),
+            level: c.office_level || c.office?.level || inferCandidateOfficeLevel(`${c.office_name || c.office?.office_name || ""}`),
+            district: normalizeText(c.district || c.office?.district || countyNorm || "Unknown"),
+          },
+          party_affiliation: normalizeText(c.party_affiliation || "Not listed"),
+          incumbent: typeof c.incumbent === "boolean" ? c.incumbent : null,
+          campaign_links: {
+            official_website: normalizeText(c.campaign_links?.official_website || c.source_url || ""),
+            social: Array.isArray(c.campaign_links?.social) ? c.campaign_links.social : [],
+          },
+          highlights: Array.isArray(c.highlights) ? c.highlights : [],
+          connections: Array.isArray(c.connections) ? c.connections : [],
+          ai_quality: {
+            relevance_score: Math.max(0, Math.min(100, Number(c.ai_quality?.relevance_score || 70))),
+            classification_confidence: c.ai_quality?.classification_confidence || "medium",
+          },
+          source_url: normalizeText(c.source_url || c.campaign_links?.official_website || ""),
+          retrieved_at: c.retrieved_at || now.toISOString(),
+        }))],
+        (c) => normalizeText(c.candidate_id || `${c.name}|${c.office?.office_name}|${c.office?.district}`).toLowerCase()
+      );
+      const mergedOrgs = dedupeByKey(
+        [...baseMined.parties_and_committees, ...(aiMined.parties_and_committees || []).map((o, idx) => ({
+          org_id: o.org_id || `ai-civics-org-${idx}-${normalizeText(o.name || "org").toLowerCase().replace(/\s+/g, "-")}`,
+          name: normalizeText(o.name || "Civic Organization"),
+          category: o.category || "other",
+          address: normalizeText(o.address || "Not listed"),
+          lat: Number.isFinite(Number(o.lat)) ? Number(o.lat) : null,
+          lon: Number.isFinite(Number(o.lon)) ? Number(o.lon) : null,
+          phone: normalizeText(o.phone || "Not listed"),
+          email: normalizeText(o.email || "Not listed"),
+          website: normalizeText(o.website || o.source_url || ""),
+          services: Array.isArray(o.services) ? o.services : ["voter_info", "community_events"],
+          source_url: normalizeText(o.source_url || o.website || ""),
+          retrieved_at: o.retrieved_at || now.toISOString(),
+          confidence: { overall: o.confidence?.overall || "medium" },
+        }))],
+        (o) => normalizeText(o.org_id || `${o.name}|${o.address}`).toLowerCase()
+      );
 
       const eUpsert = db.prepare(`INSERT OR REPLACE INTO civics_elections (election_id,name,country,state_or_region,county_or_district,city_or_locality,election_date,election_type,election_level,official_portal_name,official_portal_url,source_url,retrieved_at,ttl_hours,last_verified_at,confidence_overall,needs_review) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`);
       const cUpsert = db.prepare(`INSERT OR REPLACE INTO civics_candidates (candidate_id,name,office_name,office_level,district,party_affiliation,incumbent,official_website,social_links,highlights,connections,relevance_score,classification_confidence,source_url,retrieved_at,ttl_hours,last_verified_at,needs_review) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`);
       const oUpsert = db.prepare(`INSERT OR REPLACE INTO civics_orgs (org_id,name,category,address,lat,lon,phone,email,website,services,source_url,retrieved_at,ttl_hours,last_verified_at,confidence_overall,needs_review) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`);
 
       const tx = db.transaction(() => {
-        for (const e of mined.elections) {
+        for (const e of mergedElections) {
           eUpsert.run(
             e.election_id,
             e.name,
@@ -2259,7 +2413,7 @@ async function startServer() {
             e.confidence?.overall === "low" ? 1 : 0
           );
         }
-        for (const c of mined.candidates) {
+        for (const c of mergedCandidates) {
           cUpsert.run(
             c.candidate_id,
             c.name,
@@ -2281,7 +2435,7 @@ async function startServer() {
             c.ai_quality?.classification_confidence === "low" ? 1 : 0
           );
         }
-        for (const o of mined.parties_and_committees) {
+        for (const o of mergedOrgs) {
           oUpsert.run(
             o.org_id,
             o.name,
@@ -2307,7 +2461,18 @@ async function startServer() {
           eligibilityKey,
           "USA",
           stateNorm,
-          JSON.stringify(baseTools.checklist),
+          JSON.stringify(
+            dedupeByKey(
+              [
+                ...buildEligibilityFromItems(scrapedEligibility.results || [], baseTools),
+                ...(aiMined.eligibility_items || []).map((it) => ({
+                  text: normalizeText(it.text || ""),
+                  source_url: normalizeText(it.source_url || baseTools.portalUrl),
+                })),
+              ],
+              (it) => `${normalizeText(it.text).toLowerCase()}|${normalizeText(it.source_url).toLowerCase()}`
+            ).slice(0, 8)
+          ),
           JSON.stringify(baseTools.tools),
           baseTools.portalUrl,
           now.toISOString(),
@@ -2318,7 +2483,7 @@ async function startServer() {
       });
       tx();
 
-      elections = [...elections, ...mined.elections]
+      elections = [...elections, ...mergedElections]
         .filter((v, i, arr) => arr.findIndex((x) => x.election_id === v.election_id) === i)
         .filter((e) => {
           if (election_type !== "all" && e.election_type !== election_type) return false;
@@ -2330,23 +2495,33 @@ async function startServer() {
           return true;
         })
         .sort((a, b) => String(a.election_date || "").localeCompare(String(b.election_date || "")));
-      candidates = [...candidates, ...mined.candidates].filter((v, i, arr) => arr.findIndex((x) => x.candidate_id === v.candidate_id) === i);
+      candidates = [...candidates, ...mergedCandidates].filter((v, i, arr) => arr.findIndex((x) => x.candidate_id === v.candidate_id) === i);
       if (election_level !== "all") {
         candidates = candidates.filter((c) => election_level === "federal" ? c.office.level === "national" : c.office.level === election_level);
       }
-      const mergedOrgs = [...partiesAndCommittees, ...mined.parties_and_committees];
+      const mergedOrgRows = [...partiesAndCommittees, ...mergedOrgs];
       const dedupedOrgMap = new Map();
-      for (const o of mergedOrgs) {
+      for (const o of mergedOrgRows) {
         const key = `${normalizeText(o.name).toLowerCase()}|${normalizeText(o.address).toLowerCase()}`;
         if (!dedupedOrgMap.has(key)) dedupedOrgMap.set(key, o);
       }
       sourcesUsed = [
         ...sourcesUsed,
-        ...(scraped.notes || []).map((n) => ({ name: "Fallback Source", url: n, retrieved_at: now.toISOString() })),
+        ...(scrapedPrimary.notes || []).map((n) => ({ name: "Fallback Source", url: n, retrieved_at: now.toISOString() })),
+        ...(scrapedEligibility.notes || []).map((n) => ({ name: "Eligibility Source", url: n, retrieved_at: now.toISOString() })),
       ];
       eligibilityWidget = {
         jurisdiction: { country: "USA", state_or_region: stateNorm || "Unknown" },
-        checklist_items: baseTools.checklist,
+        checklist_items: dedupeByKey(
+          [
+            ...buildEligibilityFromItems(scrapedEligibility.results || [], baseTools),
+            ...(aiMined.eligibility_items || []).map((it) => ({
+              text: normalizeText(it.text || ""),
+              source_url: normalizeText(it.source_url || baseTools.portalUrl),
+            })),
+          ],
+          (it) => `${normalizeText(it.text).toLowerCase()}|${normalizeText(it.source_url).toLowerCase()}`
+        ).slice(0, 8),
         official_tools: baseTools.tools,
         retrieved_at: now.toISOString(),
         confidence: { overall: "high" },
@@ -2639,17 +2814,16 @@ async function startServer() {
       page_size = 10,
     } = req.body || {};
 
-    if (!location?.latitude || !location?.longitude) {
-      return res.json({
-        connections: [],
-        total: 0,
-        page,
-        page_size,
-        notes: ["Location unavailable. Please share city/ZIP or enable location to discover nearby users."],
-      });
-    }
-
     const currentUser = simulatedProfiles.find((p) => p.user_id === current_user_id) || simulatedProfiles[0];
+    const hasIncomingCoords =
+      Number.isFinite(Number(location?.latitude)) && Number.isFinite(Number(location?.longitude));
+    const effectiveLocation = hasIncomingCoords
+      ? { latitude: Number(location.latitude), longitude: Number(location.longitude) }
+      : {
+          latitude: Number(currentUser?.location?.lat ?? 35.9132),
+          longitude: Number(currentUser?.location?.lon ?? -79.0558),
+        };
+
     const radius = Number(filters.radius_miles || 25);
     const audience = (filters.audience_type || "all").toLowerCase();
     const field = normalizeText(filters.field_of_study || "").toLowerCase();
@@ -2668,7 +2842,7 @@ async function startServer() {
       .map((profile) => {
         const hasCoords = profile.location?.lat != null && profile.location?.lon != null;
         const distance = hasCoords
-          ? calculateDistanceMiles(location.latitude, location.longitude, profile.location.lat, profile.location.lon)
+          ? calculateDistanceMiles(effectiveLocation.latitude, effectiveLocation.longitude, profile.location.lat, profile.location.lon)
           : null;
         const sharedInterests = sharedValues(
           [...(currentUser?.skills || []), ...(currentUser?.interests || [])],
@@ -2732,9 +2906,10 @@ async function startServer() {
       };
     });
 
-    const notes = total === 0
-      ? ["No users matched your filters. Try increasing radius or removing one or more filters."]
-      : [];
+    const notes = [
+      ...(!hasIncomingCoords ? ["Location unavailable. Using your profile/default area for nearby matching."] : []),
+      ...(total === 0 ? ["No users matched your filters. Try increasing radius or removing one or more filters."] : []),
+    ];
 
     return res.json({
       connections: paged,
